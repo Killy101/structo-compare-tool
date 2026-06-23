@@ -2,9 +2,9 @@ import re as _re
 from lxml import etree
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QPushButton,
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QTextEdit, QPushButton,
     QDialog, QLabel, QLineEdit, QCheckBox, QDialogButtonBox,
-    QMessageBox, QInputDialog,
+    QMessageBox, QInputDialog, QScrollArea, QFrame,
 )
 from PySide6.QtGui import (
     QSyntaxHighlighter, QTextCharFormat, QColor, QFont,
@@ -168,6 +168,153 @@ class _FindReplaceDialog(QDialog):
         self._status.setText(f'Replaced {count} occurrence(s).')
 
 
+# ── WF2 shortcut definitions ──────────────────────────────────────────────────
+# In templates:  '_' = where the selected text goes (or cursor if no selection)
+#                '|' = where the caret lands after insertion (first one wins)
+WRAP_USEREDIT = '<innodReplace userEdit="true">_</innodReplace>'
+
+EMPHASIS_TAGS = [
+    ('Alt+B', '<b>…</b>',  '<b>_</b>'),
+    ('Alt+I', '<i>…</i>',  '<i>_</i>'),
+    ('Alt+U', '<u>…</u>',  '<u>_</u>'),
+    ('Alt+S', '<s>…</s>',  '<s>_</s>'),
+]
+
+STRUCTURE_TAGS = [
+    ('Alt+P', 'innodReplace + <p>',
+     '<innodReplace text="&#10;&#10;">_</innodReplace><p>|</p>'),
+    ('Alt+L', 'innodLevel + section',
+     '<innodLevel level="|"><section>_</section></innodLevel>'),
+    ('Alt+Q', 'innodIdentifier',
+     '<innodIdentifier>|</innodIdentifier>'),
+    ('Alt+H', 'innodHeading',
+     '<innodHeading>|</innodHeading>'),
+    ('Alt+F', 'innodFootnoteRef',
+     '<innodFootnoteRef fid="|" id="" text="">_</innodFootnoteRef>'),
+    ('Alt+T', 'innodFootnote',
+     '<innodFootnote><footnote>_</footnote></innodFootnote>'),
+    ('Alt+M', 'innodImg',
+     '<innodImg src="|"><img src="_" /></innodImg>'),
+    ('Alt+6', 'innodTable (2×2)',
+     '<innodTable><table>\n  <tr><td>|</td><td></td></tr>\n'
+     '  <tr><td></td><td></td></tr>\n</table></innodTable>'),
+    ('Alt+7', 'inno-ref (manual)',
+     '<inno-ref type="manual" href="_">|</inno-ref>'),
+]
+
+GENERAL_SHORTCUTS = [
+    ('Ctrl+S',        'Save XML (Save As…)'),
+    ('Ctrl+Shift+E',  'Wrap selection as <innodReplace userEdit>…</innodReplace>'),
+    ('Ctrl+Shift+F',  'Format / pretty-print XML'),
+    ('Ctrl+Z / Ctrl+Y', 'Undo / Redo'),
+    ('Ctrl+F / Ctrl+H', 'Find / Find & Replace'),
+    ('Ctrl+G',        'Go to line'),
+    ('Ctrl+/',        'Toggle comment on selection'),
+    ('F1',            'Show this Shortcuts help'),
+]
+
+
+class _ShortcutsDialog(QDialog):
+    """Help & Shortcuts modal, styled after the Structo WF2 reference."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('XML Editor — Help & Shortcuts')
+        self.setModal(True)
+        self.resize(560, 640)
+        self.setStyleSheet('background:#ffffff;')
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+
+        # Header
+        header = QLabel('  ⌨  XML Editor — Help & Shortcuts')
+        header.setStyleSheet(
+            'font-size:16px;font-weight:bold;color:#1f3a5f;padding:14px;'
+            'border-bottom:1px solid #e0e0e0;'
+        )
+        root.addWidget(header)
+
+        # Scrollable body
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet('border:none;')
+        body = QWidget()
+        bl = QVBoxLayout(body)
+        bl.setContentsMargins(18, 14, 18, 14)
+        bl.setSpacing(14)
+
+        bl.addWidget(self._section('General', [
+            (k, d, None) for k, d in GENERAL_SHORTCUTS
+        ]))
+        bl.addWidget(self._section('Emphasis Tags  (select text first, or inserts empty tag)',
+                                   EMPHASIS_TAGS))
+        bl.addWidget(self._section('Structure Tags  (insert at cursor)', STRUCTURE_TAGS))
+        bl.addStretch()
+
+        scroll.setWidget(body)
+        root.addWidget(scroll, 1)
+
+        # Footer
+        footer = QHBoxLayout()
+        footer.setContentsMargins(14, 8, 14, 12)
+        footer.addWidget(QLabel(
+            '<span style="color:#888;font-size:11px">Press Esc or click Close.</span>'
+        ))
+        footer.addStretch()
+        close = QPushButton('Got it')
+        close.setStyleSheet(
+            'QPushButton{background:#2a9d8f;color:#fff;border:none;'
+            'padding:6px 18px;border-radius:4px;font-weight:bold;}'
+            'QPushButton:hover{background:#21867a;}'
+        )
+        close.clicked.connect(self.accept)
+        footer.addWidget(close)
+        root.addLayout(footer)
+
+    @staticmethod
+    def _kbd(text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(
+            'background:#f5f5f5;border:1px solid #ccc;border-radius:4px;'
+            'padding:1px 7px;font-family:Consolas,monospace;font-size:11px;'
+            'color:#333;'
+        )
+        return lbl
+
+    def _section(self, title: str, rows: list) -> QWidget:
+        wrap = QWidget()
+        wl = QVBoxLayout(wrap)
+        wl.setContentsMargins(0, 0, 0, 0)
+        wl.setSpacing(6)
+
+        t = QLabel(title)
+        t.setStyleSheet('color:#2a6f97;font-size:13px;font-weight:bold;')
+        wl.addWidget(t)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(5)
+        grid.setColumnStretch(1, 1)
+        for r, row in enumerate(rows):
+            key, desc = row[0], row[1]
+            kbd_wrap = QHBoxLayout()
+            kbd_wrap.setContentsMargins(0, 0, 0, 0)
+            kbd_wrap.addWidget(self._kbd(key))
+            kbd_wrap.addStretch()
+            kbd_container = QWidget()
+            kbd_container.setLayout(kbd_wrap)
+            kbd_container.setFixedWidth(130)
+            grid.addWidget(kbd_container, r, 0)
+
+            d = QLabel(desc)
+            d.setStyleSheet('color:#444;font-size:12px;')
+            d.setWordWrap(True)
+            grid.addWidget(d, r, 1)
+        wl.addLayout(grid)
+        return wrap
+
+
 class XmlEditor(QWidget):
     """XML editor widget with syntax highlighting and editor shortcuts."""
 
@@ -203,11 +350,13 @@ class XmlEditor(QWidget):
         self._btn_cmt   = _tbtn('Comment',      'Toggle comment on selection (Ctrl+/)')
         self._btn_undo  = _tbtn('↩ Undo',       'Undo (Ctrl+Z)')
         self._btn_redo  = _tbtn('↪ Redo',       'Redo (Ctrl+Y)')
+        self._btn_help  = _tbtn('⌨ Shortcuts',  'Show all editor shortcuts (F1)')
 
         for btn in [self._btn_fmt, self._btn_find, self._btn_repl,
                     self._btn_goto, self._btn_cmt, self._btn_undo, self._btn_redo]:
             tb.addWidget(btn)
         tb.addStretch()
+        tb.addWidget(self._btn_help)
         root.addWidget(toolbar)
 
         # ── Editor ───────────────────────────────────────────────────────────
@@ -231,13 +380,22 @@ class XmlEditor(QWidget):
         self._btn_cmt.clicked.connect(self._toggle_comment)
         self._btn_undo.clicked.connect(self._edit.undo)
         self._btn_redo.clicked.connect(self._edit.redo)
+        self._btn_help.clicked.connect(self._show_shortcuts)
 
-        # ── Keyboard shortcuts ────────────────────────────────────────────────
+        # ── Keyboard shortcuts: editing actions ───────────────────────────────
         QShortcut(QKeySequence('Ctrl+Shift+F'), self).activated.connect(self._format_xml)
         QShortcut(QKeySequence('Ctrl+F'),       self).activated.connect(self._show_find)
         QShortcut(QKeySequence('Ctrl+H'),       self).activated.connect(self._show_find_replace)
         QShortcut(QKeySequence('Ctrl+G'),       self).activated.connect(self._goto_line)
         QShortcut(QKeySequence('Ctrl+/'),       self).activated.connect(self._toggle_comment)
+        QShortcut(QKeySequence('F1'),           self).activated.connect(self._show_shortcuts)
+
+        # ── Keyboard shortcuts: WF2 tag insertion ─────────────────────────────
+        QShortcut(QKeySequence('Ctrl+Shift+E'), self).activated.connect(
+            lambda: self._insert_template(WRAP_USEREDIT))
+        for key, _label, template in EMPHASIS_TAGS + STRUCTURE_TAGS:
+            QShortcut(QKeySequence(key), self).activated.connect(
+                lambda t=template: self._insert_template(t))
 
         self._find_dlg: _FindReplaceDialog | None = None
 
@@ -293,6 +451,33 @@ class XmlEditor(QWidget):
             cursor.setPosition(block.position())
             self._edit.setTextCursor(cursor)
             self._edit.ensureCursorVisible()
+
+    def _insert_template(self, template: str):
+        """
+        Insert a tag template, wrapping any current selection.
+        '_' marks where the selection goes; '|' marks the final caret position.
+        """
+        cursor = self._edit.textCursor()
+        sel = cursor.selectedText().replace(' ', chr(10))  # Qt para-sep U+2029 → \n
+
+        body = template.replace('_', sel)
+        if '|' in body:
+            caret_off = body.index('|')
+            body = body.replace('|', '')
+        elif '_' in template:
+            # Place caret right after the inserted selection.
+            caret_off = template.index('_') + len(sel)
+        else:
+            caret_off = len(body)
+
+        cursor.insertText(body)
+        # insertText leaves the caret at the end of `body`; walk it back.
+        cursor.setPosition(cursor.position() - (len(body) - caret_off))
+        self._edit.setTextCursor(cursor)
+        self._edit.setFocus()
+
+    def _show_shortcuts(self):
+        _ShortcutsDialog(self).exec()
 
     def _toggle_comment(self):
         """Wrap/unwrap the selected text (or current line) in an XML comment."""
