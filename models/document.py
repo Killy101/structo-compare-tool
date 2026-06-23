@@ -9,6 +9,7 @@ class TextSpan:
     bold: bool = False
     italic: bool = False
     strikethrough: bool = False
+    underline: bool = False
 
     def to_html(self) -> str:
         t = _html.escape(self.text)
@@ -19,9 +20,11 @@ class TextSpan:
             styles.append('font-weight:bold')
         if self.italic:
             styles.append('font-style:italic')
+        if self.underline:
+            decorations.append('underline')
         if self.strikethrough:
             decorations.append('line-through')
-            styles.append('color:#888')   # grey tint for source strikethrough
+            styles.append('color:#888')
 
         if decorations:
             styles.append('text-decoration:' + ' '.join(decorations))
