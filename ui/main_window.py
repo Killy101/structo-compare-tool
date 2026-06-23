@@ -1,11 +1,12 @@
 import os
+import traceback
 
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget,
     QSplitter, QPushButton, QFileDialog, QStatusBar,
-    QLabel, QTextBrowser,
+    QLabel, QTextBrowser, QProgressBar, QCheckBox, QFrame,
 )
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QUrl
 from PySide6.QtGui import QKeySequence, QShortcut
 
 from ui.document_panel import DocumentPanel
@@ -17,36 +18,57 @@ from models.document import Document
 
 
 # ---------------------------------------------------------------------------
-# Background worker — keeps UI responsive on large files
+# Background worker — extracts PDFs and runs diff in one go
 # ---------------------------------------------------------------------------
 class _CompareWorker(QThread):
-    done = Signal(str, str, str)  # old_html, new_html, sidebar_html
-    error = Signal(str)
+    progress = Signal(str, int)   # status message, percent (0–100)
+    done     = Signal()
+    error    = Signal(str)
 
-    def __init__(self, old_doc: Document, new_doc: Document):
+    def __init__(self, old_path: str, new_path: str):
         super().__init__()
-        self._old = old_doc
-        self._new = new_doc
+        self.old_path = old_path
+        self.new_path = new_path
+        # Results populated by run()
+        self.old_doc:      Document | None = None
+        self.new_doc:      Document | None = None
+        self.old_html:     str = ''
+        self.new_html:     str = ''
+        self.sidebar_html: str = ''
 
     def run(self):
         try:
-            old_html, new_html, sidebar_html = build_diff_html(self._old, self._new)
-            self.done.emit(old_html, new_html, sidebar_html)
+            self.progress.emit('Extracting Old PDF…', 10)
+            self.old_doc = extract_pdf(self.old_path)
+
+            self.progress.emit('Extracting New PDF…', 40)
+            self.new_doc = extract_pdf(self.new_path)
+
+            self.progress.emit('Comparing documents…', 75)
+            self.old_html, self.new_html, self.sidebar_html = build_diff_html(
+                self.old_doc, self.new_doc
+            )
+
+            self.progress.emit('Done', 100)
+            self.done.emit()
         except Exception as exc:
-            self.error.emit(str(exc))
+            self.error.emit(str(exc) + '\n\n' + traceback.format_exc())
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Small helpers
 # ---------------------------------------------------------------------------
-def _btn(label: str, color: str, hover: str) -> QPushButton:
+def _btn(label: str, color: str, hover: str, min_w: int = 0) -> QPushButton:
     b = QPushButton(label)
-    b.setStyleSheet(
+    style = (
         f'QPushButton{{background:{color};color:#fff;border:none;'
         f'padding:6px 16px;border-radius:4px;font-weight:bold;}}'
         f'QPushButton:hover{{background:{hover};}}'
         f'QPushButton:disabled{{background:#555;color:#999;}}'
     )
+    b.setStyleSheet(style)
+    if min_w:
+        b.setMinimumWidth(min_w)
     return b
 
 
@@ -69,6 +91,209 @@ def _legend_chip(color: str, text: str) -> QLabel:
     return lbl
 
 
+def _sep() -> QFrame:
+    f = QFrame()
+    f.setFrameShape(QFrame.Shape.VLine)
+    f.setStyleSheet('color:#3a3a4a;')
+    return f
+
+
+# ---------------------------------------------------------------------------
+# Upload screen (page 0)
+# ---------------------------------------------------------------------------
+class _UploadPage(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet('background:#12122a;')
+
+        outer = QVBoxLayout(self)
+        outer.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        card = QWidget()
+        card.setFixedWidth(560)
+        card.setStyleSheet(
+            'background:#1e1e38;border-radius:12px;'
+        )
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(40, 36, 40, 36)
+        card_layout.setSpacing(20)
+
+        # Title
+        title = QLabel('Structo Compare')
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet(
+            'color:#edf2f4;font-size:26px;font-weight:bold;'
+            'letter-spacing:1px;background:transparent;'
+        )
+        subtitle = QLabel('Document Comparison Tool')
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        subtitle.setStyleSheet('color:#8890aa;font-size:13px;background:transparent;')
+        card_layout.addWidget(title)
+        card_layout.addWidget(subtitle)
+
+        # Divider
+        div = QFrame()
+        div.setFrameShape(QFrame.Shape.HLine)
+        div.setStyleSheet('color:#2e2e50;')
+        card_layout.addWidget(div)
+
+        # File row helper
+        def file_row(icon: str, label: str, optional: bool = False):
+            row = QWidget()
+            row.setStyleSheet('background:transparent;')
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(0, 0, 0, 0)
+            rl.setSpacing(10)
+
+            lbl = QLabel(f'{icon}  {label}')
+            lbl.setStyleSheet(
+                'color:#cdd6f4;font-size:13px;font-weight:bold;'
+                'background:transparent;min-width:120px;'
+            )
+            lbl.setFixedWidth(130)
+
+            fname = QLabel('No file selected')
+            fname.setStyleSheet(
+                'color:#6272a4;font-size:12px;background:transparent;'
+            )
+            fname.setWordWrap(False)
+
+            opt_tag = QLabel('optional') if optional else QLabel('')
+            opt_tag.setStyleSheet(
+                'color:#6272a4;font-size:10px;background:transparent;'
+            )
+
+            browse = _btn('Browse…', '#3a3a6a', '#4a4a8a')
+            browse.setFixedWidth(90)
+
+            rl.addWidget(lbl)
+            rl.addWidget(fname, 1)
+            rl.addWidget(opt_tag)
+            rl.addWidget(browse)
+            return row, fname, browse
+
+        self._old_row, self._old_lbl, self._btn_old = file_row('📄', 'Old PDF')
+        self._new_row, self._new_lbl, self._btn_new = file_row('📄', 'New PDF')
+        self._xml_row, self._xml_lbl, self._btn_xml = file_row('📋', 'XML File', optional=True)
+
+        card_layout.addWidget(self._old_row)
+        card_layout.addWidget(self._new_row)
+        card_layout.addWidget(self._xml_row)
+
+        # Compare button
+        self.btn_compare = _btn('⟳  Compare', '#2a9d8f', '#21867a', min_w=160)
+        self.btn_compare.setFixedHeight(40)
+        self.btn_compare.setEnabled(False)
+        cmp_wrap = QHBoxLayout()
+        cmp_wrap.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        cmp_wrap.addWidget(self.btn_compare)
+        card_layout.addLayout(cmp_wrap)
+
+        self._hint = QLabel('Select Old PDF and New PDF to enable comparison.')
+        self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._hint.setStyleSheet('color:#585b70;font-size:11px;background:transparent;')
+        card_layout.addWidget(self._hint)
+
+        outer.addWidget(card)
+
+        # State
+        self.old_path: str = ''
+        self.new_path: str = ''
+        self.xml_path: str = ''
+
+        # Signals
+        self._btn_old.clicked.connect(self._browse_old)
+        self._btn_new.clicked.connect(self._browse_new)
+        self._btn_xml.clicked.connect(self._browse_xml)
+
+    def _browse(self, title: str, ffilter: str) -> str:
+        path, _ = QFileDialog.getOpenFileName(self, title, '', ffilter)
+        return path
+
+    def _browse_old(self):
+        p = self._browse('Open Old PDF', 'PDF Files (*.pdf)')
+        if p:
+            self.old_path = p
+            self._old_lbl.setText(os.path.basename(p))
+            self._old_lbl.setStyleSheet(
+                'color:#a6e3a1;font-size:12px;background:transparent;'
+            )
+            self._update_compare()
+
+    def _browse_new(self):
+        p = self._browse('Open New PDF', 'PDF Files (*.pdf)')
+        if p:
+            self.new_path = p
+            self._new_lbl.setText(os.path.basename(p))
+            self._new_lbl.setStyleSheet(
+                'color:#a6e3a1;font-size:12px;background:transparent;'
+            )
+            self._update_compare()
+
+    def _browse_xml(self):
+        p = self._browse('Open XML File', 'XML / XHTML Files (*.xml *.xhtml *.html *.htm)')
+        if p:
+            self.xml_path = p
+            self._xml_lbl.setText(os.path.basename(p))
+            self._xml_lbl.setStyleSheet(
+                'color:#a6e3a1;font-size:12px;background:transparent;'
+            )
+
+    def _update_compare(self):
+        ready = bool(self.old_path and self.new_path)
+        self.btn_compare.setEnabled(ready)
+        if ready:
+            self._hint.setText('Click Compare to start analysis.')
+        else:
+            self._hint.setText('Select Old PDF and New PDF to enable comparison.')
+
+
+# ---------------------------------------------------------------------------
+# Processing screen (page 1)
+# ---------------------------------------------------------------------------
+class _ProcessingPage(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setStyleSheet('background:#12122a;')
+
+        outer = QVBoxLayout(self)
+        outer.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        card = QWidget()
+        card.setFixedWidth(480)
+        card.setStyleSheet('background:#1e1e38;border-radius:12px;')
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(40, 40, 40, 40)
+        cl.setSpacing(18)
+
+        title = QLabel('Processing Comparison…')
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet(
+            'color:#edf2f4;font-size:20px;font-weight:bold;background:transparent;'
+        )
+        cl.addWidget(title)
+
+        self._status = QLabel('Initialising…')
+        self._status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._status.setStyleSheet('color:#a6adc8;font-size:13px;background:transparent;')
+        cl.addWidget(self._status)
+
+        self._bar = QProgressBar()
+        self._bar.setRange(0, 0)   # indeterminate / pulsing
+        self._bar.setTextVisible(False)
+        self._bar.setFixedHeight(8)
+        self._bar.setStyleSheet(
+            'QProgressBar{background:#2b2d42;border-radius:4px;border:none;}'
+            'QProgressBar::chunk{background:#2a9d8f;border-radius:4px;}'
+        )
+        cl.addWidget(self._bar)
+
+        outer.addWidget(card)
+
+    def set_status(self, msg: str, _pct: int = 0):
+        self._status.setText(msg)
+
+
 # ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
@@ -78,42 +303,79 @@ class MainWindow(QMainWindow):
         self.setWindowTitle('Structo Compare — PDF vs PDF + XML Editor')
         self.resize(1600, 920)
 
-        self._old_doc: Document | None = None
-        self._new_doc: Document | None = None
-        self._worker: _CompareWorker | None = None
+        self._old_doc:      Document | None = None
+        self._new_doc:      Document | None = None
+        self._old_diff_html: str = ''
+        self._new_diff_html: str = ''
+        self._worker:        _CompareWorker | None = None
+        self._view_raw:      bool = False
+        self._scroll_syncing: bool = False
 
         self._build_ui()
         self._wire_signals()
 
-    # ------------------------------------------------------------------
+    # ── Build UI ──────────────────────────────────────────────────────────────
     def _build_ui(self):
+        self._stack = QStackedWidget()
+        self.setCentralWidget(self._stack)
 
-        # ── Toolbar ──────────────────────────────────────────────────
+        self._upload_page = _UploadPage()
+        self._proc_page   = _ProcessingPage()
+        self._work_page   = self._build_workspace()
+
+        self._stack.addWidget(self._upload_page)   # index 0
+        self._stack.addWidget(self._proc_page)     # index 1
+        self._stack.addWidget(self._work_page)     # index 2
+
+        self._stack.setCurrentIndex(0)
+
+        self._status = QStatusBar()
+        self._status.setStyleSheet('font-size:12px;')
+        self.setStatusBar(self._status)
+        self._status.showMessage('Select files on the upload screen to begin.')
+
+    def _build_workspace(self) -> QWidget:
+        container = QWidget()
+        root = QVBoxLayout(container)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── Toolbar ──────────────────────────────────────────────────────────
         toolbar = QWidget()
         toolbar.setStyleSheet('background:#1a1a2e;')
         toolbar.setFixedHeight(52)
         tb = QHBoxLayout(toolbar)
         tb.setContentsMargins(12, 0, 12, 0)
-        tb.setSpacing(8)
+        tb.setSpacing(6)
 
         logo = QLabel('Structo Compare')
         logo.setStyleSheet(
             'color:#edf2f4;font-size:17px;font-weight:bold;letter-spacing:1px;'
         )
 
-        self.btn_old  = _btn('Open Old PDF',  '#4361ee', '#3a56d4')
-        self.btn_new  = _btn('Open New PDF',  '#4361ee', '#3a56d4')
-        self.btn_xml  = _btn('Open XML',      '#7b5ea7', '#6a4d94')
-        self.btn_cmp  = _btn('⟳  Compare',   '#2a9d8f', '#21867a')
-        self.btn_save = _btn('Save XML As…',  '#e76f51', '#d4623d')
+        self.btn_back    = _btn('← New Files',   '#3a3a6a', '#4a4a8a')
+        self.btn_view    = _btn('PDF Raw View',   '#6c757d', '#5a6268')
+        self.btn_save    = _btn('Save XML As…',   '#e76f51', '#d4623d')
+
+        self._sync_cb = QCheckBox('Sync Scroll')
+        self._sync_cb.setStyleSheet(
+            'QCheckBox{color:#cdd6f4;font-size:12px;spacing:5px;}'
+            'QCheckBox::indicator{width:14px;height:14px;}'
+            'QCheckBox::indicator:unchecked{background:#3a3a5a;border:1px solid #556;border-radius:3px;}'
+            'QCheckBox::indicator:checked{background:#2a9d8f;border:1px solid #2a9d8f;border-radius:3px;}'
+        )
 
         tb.addWidget(logo)
         tb.addStretch()
-        for w in [self.btn_old, self.btn_new, self.btn_xml,
-                  QLabel(''), self.btn_cmp, self.btn_save]:
-            tb.addWidget(w)
+        tb.addWidget(self.btn_back)
+        tb.addWidget(_sep())
+        tb.addWidget(self._sync_cb)
+        tb.addWidget(self.btn_view)
+        tb.addWidget(_sep())
+        tb.addWidget(self.btn_save)
+        root.addWidget(toolbar)
 
-        # ── Old PDF panel ────────────────────────────────────────────
+        # ── Old PDF panel ─────────────────────────────────────────────────────
         old_wrap = QWidget()
         ow = QVBoxLayout(old_wrap)
         ow.setContentsMargins(0, 0, 0, 0)
@@ -122,7 +384,7 @@ class MainWindow(QMainWindow):
         self.old_panel = DocumentPanel()
         ow.addWidget(self.old_panel)
 
-        # ── New PDF panel ────────────────────────────────────────────
+        # ── New PDF panel ─────────────────────────────────────────────────────
         new_wrap = QWidget()
         nw = QVBoxLayout(new_wrap)
         nw.setContentsMargins(0, 0, 0, 0)
@@ -131,14 +393,14 @@ class MainWindow(QMainWindow):
         self.new_panel = DocumentPanel()
         nw.addWidget(self.new_panel)
 
-        # ── PDF row (top, horizontal split) ─────────────────────────
+        # ── PDF row ───────────────────────────────────────────────────────────
         pdf_splitter = QSplitter(Qt.Orientation.Horizontal)
         pdf_splitter.addWidget(old_wrap)
         pdf_splitter.addWidget(new_wrap)
         pdf_splitter.setSizes([800, 800])
         pdf_splitter.setHandleWidth(4)
 
-        # ── XML Editor (bottom) ──────────────────────────────────────
+        # ── XML Editor ────────────────────────────────────────────────────────
         xml_wrap = QWidget()
         xw = QVBoxLayout(xml_wrap)
         xw.setContentsMargins(0, 0, 0, 0)
@@ -147,14 +409,13 @@ class MainWindow(QMainWindow):
         self.xml_editor = XmlEditor()
         xw.addWidget(self.xml_editor)
 
-        # ── Left column: PDF row on top, XML editor below ────────────
         left_splitter = QSplitter(Qt.Orientation.Vertical)
         left_splitter.addWidget(pdf_splitter)
         left_splitter.addWidget(xml_wrap)
         left_splitter.setSizes([560, 280])
         left_splitter.setHandleWidth(4)
 
-        # ── Changes sidebar (right) ──────────────────────────────────
+        # ── Changes sidebar ───────────────────────────────────────────────────
         sidebar_wrap = QWidget()
         sidebar_wrap.setMinimumWidth(240)
         sw = QVBoxLayout(sidebar_wrap)
@@ -171,136 +432,172 @@ class MainWindow(QMainWindow):
         )
         sw.addWidget(self.sidebar)
 
-        # ── Main horizontal splitter: left content | sidebar ─────────
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
         main_splitter.addWidget(left_splitter)
         main_splitter.addWidget(sidebar_wrap)
-        main_splitter.setSizes([1250, 320])
+        main_splitter.setSizes([1260, 310])
         main_splitter.setHandleWidth(4)
+        root.addWidget(main_splitter, 1)
 
-        # ── Legend bar ───────────────────────────────────────────────
+        # ── Legend bar ────────────────────────────────────────────────────────
         legend_bar = QWidget()
-        legend_bar.setStyleSheet(
-            'background:#f8f9fa;border-top:1px solid #dee2e6;'
-        )
+        legend_bar.setStyleSheet('background:#f8f9fa;border-top:1px solid #dee2e6;')
         leg = QHBoxLayout(legend_bar)
         leg.setContentsMargins(12, 4, 12, 4)
         leg.addWidget(QLabel('<b>Legend:</b>'))
         leg.addSpacing(6)
-        leg.addWidget(_legend_chip('#ffb3b3', 'Deleted'))
-        leg.addSpacing(4)
-        leg.addWidget(_legend_chip('#b3ffb3', 'Added'))
-        leg.addSpacing(4)
-        leg.addWidget(_legend_chip('#ffffa0', 'Modified (new)'))
-        leg.addSpacing(4)
-        leg.addWidget(_legend_chip('#ffd6d6', 'Modified (old)'))
+        for color, label in [
+            ('#ffb3b3', 'Deleted'),
+            ('#b3ffb3', 'Added'),
+            ('#ffffa0', 'Modified (new)'),
+            ('#ffd6d6', 'Modified (old)'),
+            ('#ddd0ff', 'Emphasis change'),
+        ]:
+            leg.addWidget(_legend_chip(color, label))
+            leg.addSpacing(4)
         leg.addStretch()
         leg.addWidget(QLabel(
             '<span style="color:#888;font-size:11px">'
             'Bold <b>B</b> · Italic <i>I</i> · Strike <s>S</s></span>'
         ))
-
-        # ── Status bar ───────────────────────────────────────────────
-        self._status = QStatusBar()
-        self._status.setStyleSheet('font-size:12px;')
-        self.setStatusBar(self._status)
-        self._status.showMessage(
-            'Open Old PDF, New PDF, and XML file — then click Compare.'
-        )
-
-        # ── Root layout ──────────────────────────────────────────────
-        central = QWidget()
-        root = QVBoxLayout(central)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-        root.addWidget(toolbar)
-        root.addWidget(main_splitter, 1)
         root.addWidget(legend_bar)
-        self.setCentralWidget(central)
 
-    # ------------------------------------------------------------------
+        return container
+
+    # ── Wire signals ──────────────────────────────────────────────────────────
     def _wire_signals(self):
-        self.btn_old.clicked.connect(self._open_old_pdf)
-        self.btn_new.clicked.connect(self._open_new_pdf)
-        self.btn_xml.clicked.connect(self._open_xml)
-        self.btn_cmp.clicked.connect(self._compare)
+        # Upload page
+        self._upload_page.btn_compare.clicked.connect(self._start_compare)
+
+        # Workspace toolbar
+        self.btn_back.clicked.connect(self._go_to_upload)
+        self.btn_view.clicked.connect(self._toggle_view)
         self.btn_save.clicked.connect(self._save_xml)
         QShortcut(QKeySequence('Ctrl+S'), self).activated.connect(self._save_xml)
 
-    # ------------------------------------------------------------------
-    def _open_old_pdf(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, 'Open Old PDF', '', 'PDF Files (*.pdf)'
+        # Sync scroll
+        self._sync_cb.toggled.connect(self._on_sync_toggled)
+
+        # Sidebar navigation
+        self.sidebar.anchorClicked.connect(self._on_sidebar_click)
+
+    # ── Upload / compare flow ─────────────────────────────────────────────────
+    def _go_to_upload(self):
+        self._stack.setCurrentIndex(0)
+        self._status.showMessage('Select files to begin a new comparison.')
+
+    def _start_compare(self):
+        up = self._upload_page
+        if not up.old_path or not up.new_path:
+            return
+
+        # Load XML immediately (lightweight)
+        if up.xml_path:
+            try:
+                xml_doc = extract_xml(up.xml_path)
+                self.xml_editor.setPlainText(xml_doc.raw_xml)
+            except Exception as e:
+                self._status.showMessage(f'XML load error: {e}')
+
+        # Switch to processing screen
+        self._stack.setCurrentIndex(1)
+        self._proc_page.set_status('Initialising…')
+        self._status.showMessage('Processing…')
+
+        self._worker = _CompareWorker(up.old_path, up.new_path)
+        self._worker.progress.connect(self._proc_page.set_status)
+        self._worker.progress.connect(
+            lambda msg, _pct: self._status.showMessage(msg)
         )
-        if not path:
-            return
-        self._status.showMessage('Loading Old PDF…')
-        try:
-            self._old_doc = extract_pdf(path)
-            self.old_panel.set_html(self._old_doc.to_html())
-            self._status.showMessage(f'Old PDF: {os.path.basename(path)}')
-        except Exception as e:
-            self._status.showMessage(f'Error: {e}')
-
-    def _open_new_pdf(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, 'Open New PDF', '', 'PDF Files (*.pdf)'
-        )
-        if not path:
-            return
-        self._status.showMessage('Loading New PDF…')
-        try:
-            self._new_doc = extract_pdf(path)
-            self.new_panel.set_html(self._new_doc.to_html())
-            self._status.showMessage(f'New PDF: {os.path.basename(path)}')
-        except Exception as e:
-            self._status.showMessage(f'Error: {e}')
-
-    def _open_xml(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, 'Open XML', '',
-            'XML / XHTML Files (*.xml *.xhtml *.html *.htm)'
-        )
-        if not path:
-            return
-        try:
-            xml_doc = extract_xml(path)
-            self.xml_editor.setPlainText(xml_doc.raw_xml)
-            self._status.showMessage(f'XML: {os.path.basename(path)}')
-        except Exception as e:
-            self._status.showMessage(f'Error loading XML: {e}')
-
-    def _compare(self):
-        if not self._old_doc:
-            self._status.showMessage('Open the Old PDF first.')
-            return
-        if not self._new_doc:
-            self._status.showMessage('Open the New PDF first.')
-            return
-
-        self.btn_cmp.setEnabled(False)
-        self._status.showMessage('Comparing…')
-
-        self._worker = _CompareWorker(self._old_doc, self._new_doc)
-        self._worker.done.connect(self._on_done)
-        self._worker.error.connect(self._on_error)
+        self._worker.done.connect(self._on_compare_done)
+        self._worker.error.connect(self._on_compare_error)
         self._worker.start()
 
-    def _on_done(self, old_html: str, new_html: str, sidebar_html: str):
-        self.old_panel.set_html(old_html)
-        self.new_panel.set_html(new_html)
-        self.sidebar.setHtml(sidebar_html)
-        self.btn_cmp.setEnabled(True)
+    def _on_compare_done(self):
+        w = self._worker
+        self._old_doc       = w.old_doc
+        self._new_doc       = w.new_doc
+        self._old_diff_html = w.old_html
+        self._new_diff_html = w.new_html
+        self._view_raw      = False
+        self.btn_view.setText('PDF Raw View')
+
+        self.old_panel.set_html(self._old_diff_html)
+        self.new_panel.set_html(self._new_diff_html)
+        self.sidebar.setHtml(w.sidebar_html)
+
+        self._stack.setCurrentIndex(2)
         self._status.showMessage(
             'Comparison complete. Edit XML below and Save XML As… when done.'
         )
 
-    def _on_error(self, msg: str):
-        self.btn_cmp.setEnabled(True)
-        self._status.showMessage(f'Compare error: {msg}')
+    def _on_compare_error(self, msg: str):
+        self._stack.setCurrentIndex(0)
+        self._status.showMessage(f'Compare error: {msg[:120]}')
 
+    # ── View mode toggle ──────────────────────────────────────────────────────
+    def _toggle_view(self):
+        if self._old_doc is None:
+            return
+        self._view_raw = not self._view_raw
+        if self._view_raw:
+            self.old_panel.set_html(self._old_doc.to_html())
+            self.new_panel.set_html(self._new_doc.to_html())
+            self.btn_view.setText('Compare View')
+            self._status.showMessage('PDF Raw View — showing extracted text without diff highlights.')
+        else:
+            self.old_panel.set_html(self._old_diff_html)
+            self.new_panel.set_html(self._new_diff_html)
+            self.btn_view.setText('PDF Raw View')
+            self._status.showMessage('Compare View — diff highlights restored.')
+
+    # ── Sync scroll ───────────────────────────────────────────────────────────
+    def _on_sync_toggled(self, checked: bool):
+        old_sb = self.old_panel.browser.verticalScrollBar()
+        new_sb = self.new_panel.browser.verticalScrollBar()
+
+        if checked:
+            old_sb.valueChanged.connect(self._sync_old_to_new)
+            new_sb.valueChanged.connect(self._sync_new_to_old)
+        else:
+            try:
+                old_sb.valueChanged.disconnect(self._sync_old_to_new)
+                new_sb.valueChanged.disconnect(self._sync_new_to_old)
+            except RuntimeError:
+                pass
+
+    def _sync_old_to_new(self, value: int):
+        if self._scroll_syncing:
+            return
+        self._scroll_syncing = True
+        sb = self.new_panel.browser.verticalScrollBar()
+        # Scale proportionally in case documents have different lengths
+        old_sb = self.old_panel.browser.verticalScrollBar()
+        if old_sb.maximum() > 0:
+            frac = value / old_sb.maximum()
+            sb.setValue(int(frac * sb.maximum()))
+        self._scroll_syncing = False
+
+    def _sync_new_to_old(self, value: int):
+        if self._scroll_syncing:
+            return
+        self._scroll_syncing = True
+        sb = self.old_panel.browser.verticalScrollBar()
+        new_sb = self.new_panel.browser.verticalScrollBar()
+        if new_sb.maximum() > 0:
+            frac = value / new_sb.maximum()
+            sb.setValue(int(frac * sb.maximum()))
+        self._scroll_syncing = False
+
+    # ── Sidebar click-to-navigate ─────────────────────────────────────────────
+    def _on_sidebar_click(self, url: QUrl):
+        anchor = url.toString()
+        if anchor:
+            self.old_panel.scroll_to_anchor(anchor)
+            self.new_panel.scroll_to_anchor(anchor)
+
+    # ── Save XML ──────────────────────────────────────────────────────────────
     def _save_xml(self):
-        """Always opens a Save As dialog so user picks the path."""
         path, _ = QFileDialog.getSaveFileName(
             self, 'Save XML As', '',
             'XML Files (*.xml);;All Files (*)'
