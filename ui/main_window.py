@@ -137,48 +137,54 @@ class _UploadPage(QWidget):
         div.setStyleSheet('color:#2e2e50;')
         card_layout.addWidget(div)
 
-        # File row helper
+        # Drop-zone style row helper
         def file_row(icon: str, label: str, optional: bool = False):
-            row = QWidget()
-            row.setStyleSheet('background:transparent;')
+            row = QFrame()
+            row.setStyleSheet(
+                'QFrame{background:#16162e;border:1px dashed #3a3a5a;'
+                'border-radius:8px;}'
+            )
             rl = QHBoxLayout(row)
-            rl.setContentsMargins(0, 0, 0, 0)
+            rl.setContentsMargins(14, 10, 14, 10)
             rl.setSpacing(10)
 
             lbl = QLabel(f'{icon}  {label}')
             lbl.setStyleSheet(
                 'color:#cdd6f4;font-size:13px;font-weight:bold;'
-                'background:transparent;min-width:120px;'
+                'background:transparent;border:none;'
             )
-            lbl.setFixedWidth(130)
+            lbl.setFixedWidth(120)
 
-            fname = QLabel('No file selected')
+            info_wrap = QVBoxLayout()
+            info_wrap.setSpacing(1)
+            fname = QLabel('Drop file here  ·  or browse')
             fname.setStyleSheet(
-                'color:#6272a4;font-size:12px;background:transparent;'
+                'color:#6272a4;font-size:12px;background:transparent;border:none;'
             )
-            fname.setWordWrap(False)
-
-            opt_tag = QLabel('optional') if optional else QLabel('')
-            opt_tag.setStyleSheet(
-                'color:#6272a4;font-size:10px;background:transparent;'
+            status = QLabel('optional' if optional else '')
+            status.setStyleSheet(
+                'color:#6272a4;font-size:10px;background:transparent;border:none;'
             )
+            info_wrap.addWidget(fname)
+            info_wrap.addWidget(status)
 
             browse = _btn('Browse…', '#3a3a6a', '#4a4a8a')
             browse.setFixedWidth(90)
 
             rl.addWidget(lbl)
-            rl.addWidget(fname, 1)
-            rl.addWidget(opt_tag)
+            rl.addLayout(info_wrap, 1)
             rl.addWidget(browse)
-            return row, fname, browse
+            return row, fname, status, browse
 
-        self._old_row, self._old_lbl, self._btn_old = file_row('📄', 'Old PDF')
-        self._new_row, self._new_lbl, self._btn_new = file_row('📄', 'New PDF')
-        self._xml_row, self._xml_lbl, self._btn_xml = file_row('📋', 'XML File', optional=True)
+        self._old_row, self._old_lbl, self._old_status, self._btn_old = file_row('📄', 'Old PDF')
+        self._new_row, self._new_lbl, self._new_status, self._btn_new = file_row('📄', 'New PDF')
+        self._xml_row, self._xml_lbl, self._xml_status, self._btn_xml = file_row('📋', 'XML File', optional=True)
 
         card_layout.addWidget(self._old_row)
         card_layout.addWidget(self._new_row)
         card_layout.addWidget(self._xml_row)
+
+        self.setAcceptDrops(True)
 
         # Compare button
         self.btn_compare = _btn('⟳  Compare', '#2a9d8f', '#21867a', min_w=160)
@@ -202,42 +208,89 @@ class _UploadPage(QWidget):
         self.xml_path: str = ''
 
         # Signals
-        self._btn_old.clicked.connect(self._browse_old)
-        self._btn_new.clicked.connect(self._browse_new)
-        self._btn_xml.clicked.connect(self._browse_xml)
+        self._btn_old.clicked.connect(lambda: self._browse('old'))
+        self._btn_new.clicked.connect(lambda: self._browse('new'))
+        self._btn_xml.clicked.connect(lambda: self._browse('xml'))
 
-    def _browse(self, title: str, ffilter: str) -> str:
+    # ── File handling (shared by Browse and drag-drop) ─────────────────────────
+    _FILTERS = {
+        'old': ('Open Old PDF', 'PDF Files (*.pdf)'),
+        'new': ('Open New PDF', 'PDF Files (*.pdf)'),
+        'xml': ('Open XML File', 'XML / XHTML Files (*.xml *.xhtml *.html *.htm)'),
+    }
+
+    def _browse(self, kind: str):
+        title, ffilter = self._FILTERS[kind]
         path, _ = QFileDialog.getOpenFileName(self, title, '', ffilter)
-        return path
+        if path:
+            self._set_file(kind, path)
 
-    def _browse_old(self):
-        p = self._browse('Open Old PDF', 'PDF Files (*.pdf)')
-        if p:
-            self.old_path = p
-            self._old_lbl.setText(os.path.basename(p))
-            self._old_lbl.setStyleSheet(
-                'color:#a6e3a1;font-size:12px;background:transparent;'
-            )
-            self._update_compare()
+    @staticmethod
+    def _human_size(path: str) -> str:
+        try:
+            n = os.path.getsize(path)
+        except OSError:
+            return ''
+        for unit in ('B', 'KB', 'MB', 'GB'):
+            if n < 1024:
+                return f'{n:.0f} {unit}' if unit == 'B' else f'{n:.1f} {unit}'
+            n /= 1024
+        return f'{n:.1f} TB'
 
-    def _browse_new(self):
-        p = self._browse('Open New PDF', 'PDF Files (*.pdf)')
-        if p:
-            self.new_path = p
-            self._new_lbl.setText(os.path.basename(p))
-            self._new_lbl.setStyleSheet(
-                'color:#a6e3a1;font-size:12px;background:transparent;'
-            )
-            self._update_compare()
+    @staticmethod
+    def _validate(kind: str, path: str) -> tuple:
+        """Return (ok, message)."""
+        ext = os.path.splitext(path)[1].lower()
+        if kind in ('old', 'new'):
+            if ext != '.pdf':
+                return False, '✕ Not a PDF file'
+            try:
+                with open(path, 'rb') as f:
+                    if f.read(5) != b'%PDF-':
+                        return False, '✕ Invalid PDF header'
+            except OSError as e:
+                return False, f'✕ {e}'
+            return True, '✓ Valid PDF'
+        else:
+            if ext not in ('.xml', '.xhtml', '.html', '.htm'):
+                return False, '✕ Not an XML/HTML file'
+            return True, '✓ Valid XML'
 
-    def _browse_xml(self):
-        p = self._browse('Open XML File', 'XML / XHTML Files (*.xml *.xhtml *.html *.htm)')
-        if p:
-            self.xml_path = p
-            self._xml_lbl.setText(os.path.basename(p))
-            self._xml_lbl.setStyleSheet(
-                'color:#a6e3a1;font-size:12px;background:transparent;'
-            )
+    def _set_file(self, kind: str, path: str):
+        ok, msg = self._validate(kind, path)
+        lbl    = {'old': self._old_lbl,    'new': self._new_lbl,    'xml': self._xml_lbl}[kind]
+        status = {'old': self._old_status, 'new': self._new_status, 'xml': self._xml_status}[kind]
+
+        if ok:
+            setattr(self, f'{kind}_path', path)
+            lbl.setText(f'{os.path.basename(path)}  ·  {self._human_size(path)}')
+            lbl.setStyleSheet('color:#cdd6f4;font-size:12px;background:transparent;border:none;')
+            status.setText(msg)
+            status.setStyleSheet('color:#a6e3a1;font-size:10px;background:transparent;border:none;')
+        else:
+            setattr(self, f'{kind}_path', '')
+            lbl.setText(os.path.basename(path))
+            lbl.setStyleSheet('color:#cdd6f4;font-size:12px;background:transparent;border:none;')
+            status.setText(msg)
+            status.setStyleSheet('color:#f38ba8;font-size:10px;background:transparent;border:none;')
+
+        self._update_compare()
+
+    # ── Drag and drop ──────────────────────────────────────────────────────────
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        paths = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
+        # Route by extension; first PDF → old (if empty) else new.
+        for p in paths:
+            ext = os.path.splitext(p)[1].lower()
+            if ext == '.pdf':
+                self._set_file('old' if not self.old_path else 'new', p)
+            elif ext in ('.xml', '.xhtml', '.html', '.htm'):
+                self._set_file('xml', p)
+        event.acceptProposedAction()
 
     def _update_compare(self):
         ready = bool(self.old_path and self.new_path)
@@ -365,6 +418,11 @@ class MainWindow(QMainWindow):
             'QCheckBox::indicator:checked{background:#2a9d8f;border:1px solid #2a9d8f;border-radius:3px;}'
         )
 
+        self._save_status = QLabel('')
+        self._save_status.setStyleSheet(
+            'color:#6c7086;font-size:11px;background:transparent;'
+        )
+
         tb.addWidget(logo)
         tb.addStretch()
         tb.addWidget(self.btn_back)
@@ -372,6 +430,7 @@ class MainWindow(QMainWindow):
         tb.addWidget(self._sync_cb)
         tb.addWidget(self.btn_view)
         tb.addWidget(_sep())
+        tb.addWidget(self._save_status)
         tb.addWidget(self.btn_save)
         root.addWidget(toolbar)
 
@@ -481,6 +540,10 @@ class MainWindow(QMainWindow):
         # Sidebar navigation
         self.sidebar.anchorClicked.connect(self._on_sidebar_click)
 
+        # Save-status tracking
+        self.xml_editor.document().contentsChanged.connect(self._mark_unsaved)
+        self._xml_loaded = False
+
     # ── Upload / compare flow ─────────────────────────────────────────────────
     def _go_to_upload(self):
         self._stack.setCurrentIndex(0)
@@ -496,6 +559,8 @@ class MainWindow(QMainWindow):
             try:
                 xml_doc = extract_xml(up.xml_path)
                 self.xml_editor.setPlainText(xml_doc.raw_xml)
+                self._xml_loaded = True
+                self._set_saved_state('XML loaded — not yet saved')
             except Exception as e:
                 self._status.showMessage(f'XML load error: {e}')
 
@@ -591,10 +656,24 @@ class MainWindow(QMainWindow):
 
     # ── Sidebar click-to-navigate ─────────────────────────────────────────────
     def _on_sidebar_click(self, url: QUrl):
-        anchor = url.toString()
+        # href may arrive as "c12", "#c12" or a resolved URL with a fragment.
+        anchor = url.fragment() or url.toString().lstrip('#')
+        if '/' in anchor:
+            anchor = anchor.rsplit('/', 1)[-1]
         if anchor:
             self.old_panel.scroll_to_anchor(anchor)
             self.new_panel.scroll_to_anchor(anchor)
+
+    # ── Save-status indicator ──────────────────────────────────────────────────
+    def _set_saved_state(self, text: str, color: str = '#6c7086'):
+        self._save_status.setText(text)
+        self._save_status.setStyleSheet(
+            f'color:{color};font-size:11px;background:transparent;'
+        )
+
+    def _mark_unsaved(self):
+        if self._xml_loaded:
+            self._set_saved_state('● Unsaved changes', '#f9e2af')
 
     # ── Save XML ──────────────────────────────────────────────────────────────
     def _save_xml(self):
@@ -608,5 +687,7 @@ class MainWindow(QMainWindow):
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(self.xml_editor.toPlainText())
             self._status.showMessage(f'Saved: {path}')
+            self._set_saved_state(f'✓ Saved · {os.path.basename(path)}', '#a6e3a1')
         except Exception as e:
             self._status.showMessage(f'Save error: {e}')
+            self._set_saved_state('✕ Save failed', '#f38ba8')
