@@ -68,15 +68,24 @@ class DocumentPanel(QWidget):
             self._flash(cursor)
 
     def _cursor_at_anchor(self, anchor: str):
-        """Find a text cursor positioned at the block carrying the anchor name."""
+        """Find a text cursor positioned at the block carrying the anchor name.
+
+        The anchor element contains a zero-width space (U+200B) so that Qt
+        creates a real text fragment for it — empty <a name> elements have no
+        fragment and are never found by this walk.
+        """
         doc = self.browser.document()
         block = doc.begin()
         while block.isValid():
             it = block.begin()
             while not it.atEnd():
                 frag = it.fragment()
-                if frag.isValid():
-                    names = frag.charFormat().anchorNames()
+                # frag.isValid() requires length > 0; our &#8203; anchor
+                # satisfies that.  Check anchorNames regardless of length
+                # so we degrade gracefully for any legacy empty anchors.
+                fmt = frag.charFormat()
+                if fmt.isAnchor():
+                    names = fmt.anchorNames()
                     if anchor in names:
                         c = self.browser.textCursor()
                         c.setPosition(frag.position())
