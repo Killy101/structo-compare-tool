@@ -656,11 +656,28 @@ class MainWindow(QMainWindow):
 
     # ── Sidebar click-to-navigate ─────────────────────────────────────────────
     def _on_sidebar_click(self, url: QUrl):
-        # href may arrive as "c12", "#c12" or a resolved URL with a fragment.
-        anchor = url.fragment() or url.toString().lstrip('#')
-        if '/' in anchor:
-            anchor = anchor.rsplit('/', 1)[-1]
-        if anchor:
+        # href is "#kind:cN" (e.g. "#del:c5", "#mod:c12").
+        # Fall back to plain "#cN" for any legacy items.
+        raw = url.fragment() or url.toString().lstrip('#')
+        if '/' in raw:
+            raw = raw.rsplit('/', 1)[-1]
+        if not raw:
+            return
+
+        if ':' in raw:
+            kind, anchor = raw.split(':', 1)
+        else:
+            kind, anchor = 'mod', raw   # treat as two-panel nav
+
+        # Route to the correct panel(s):
+        #   del  → only old panel has the anchor
+        #   add  → only new panel has the anchor
+        #   mod / emph → both panels
+        if kind == 'del':
+            self.old_panel.scroll_to_anchor(anchor)
+        elif kind == 'add':
+            self.new_panel.scroll_to_anchor(anchor)
+        else:
             self.old_panel.scroll_to_anchor(anchor)
             self.new_panel.scroll_to_anchor(anchor)
 

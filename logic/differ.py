@@ -242,7 +242,12 @@ def _sidebar_item(kind: str, label: str, old_txt: str, new_txt: str, cid: str) -
     oe = _html.escape(_truncate(old_txt))
     ne = _html.escape(_truncate(new_txt))
 
-    if old_txt and new_txt:
+    if kind == 'emph':
+        # Text is the same; only formatting differed — show the text once.
+        detail = (
+            f'<div style="margin-top:3px;font-size:11px;color:#a6adc8">{oe or ne}</div>'
+        )
+    elif old_txt and new_txt:
         detail = (
             f'<div style="margin-top:3px;font-size:11px">'
             f'<span style="text-decoration:line-through;color:#f38ba8">{oe}</span>'
@@ -260,9 +265,14 @@ def _sidebar_item(kind: str, label: str, old_txt: str, new_txt: str, cid: str) -
             f'<div style="margin-top:3px;font-size:11px;color:#a6e3a1">{ne}</div>'
         )
 
+    # Encode the change type in the URL fragment so the click handler can
+    # decide which panel(s) to navigate:  del → old only, add → new only,
+    # mod/emph → both.
+    href = f'#{kind}:{cid}'
+
     return (
         f'<div class="ch {kind}">'
-        f'<a href="#{cid}" style="text-decoration:none;color:inherit;display:block">'
+        f'<a href="{href}" style="text-decoration:none;color:inherit;display:block">'
         f'<span class="badge {bclass}">{blabel}</span>'
         f'{detail}'
         f'</a>'
@@ -271,7 +281,9 @@ def _sidebar_item(kind: str, label: str, old_txt: str, new_txt: str, cid: str) -
 
 
 def _p(inner: str, anchor: str = '') -> str:
-    a_tag = f'<a name="{anchor}"></a>' if anchor else ''
+    # The zero-width space gives the anchor element a real character so that
+    # Qt's scrollToAnchor() and our _cursor_at_anchor() can actually find it.
+    a_tag = f'<a name="{anchor}">&#8203;</a>' if anchor else ''
     return f'<p style="margin:3px 0;line-height:1.6">{a_tag}{inner}</p>\n'
 
 
