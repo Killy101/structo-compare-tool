@@ -1,8 +1,74 @@
 import difflib
 import html as _html
+import re as _re
 from dataclasses import dataclass
 from models.document import Document, TextBlock
 from typing import List, Tuple
+
+
+# Collapse all whitespace (incl. non-breaking spaces) so that paragraphs which
+# differ only by PDF-extraction whitespace noise are treated as identical.
+def _norm(text: str) -> str:
+    return _re.sub(r'\s+', ' ', text.replace('\xa0', ' ')).strip()
+
+
+def _ratio(a: str, b: str) -> float:
+    return difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
+
+
+# Minimum similarity for two paragraphs in a replace-region to be considered
+# "the same paragraph, modified" rather than an unrelated delete + add.
+_PAIR_THRESHOLD = 0.4
+
+
+def _align_replace(old_slice: List[TextBlock],
+                   new_slice: List[TextBlock]) -> List[tuple]:
+    """
+    Align two runs of paragraphs that the block-level matcher flagged as a
+    'replace'. Instead of naive positional pairing, walk both lists and pair
+    blocks by text similarity so shifted/revoked items are not mispaired.
+
+    Returns an ordered list of operations:
+        ('pair', old_block, new_block)
+        ('del',  old_block, None)
+        ('add',  None,      new_block)
+    """
+    old_n = [_norm(b.plain_text()) for b in old_slice]
+    new_n = [_norm(b.plain_text()) for b in new_slice]
+
+    ops: List[tuple] = []
+    i = j = 0
+    n_old, n_new = len(old_slice), len(new_slice)
+
+    while i < n_old and j < n_new:
+        r = _ratio(old_n[i], new_n[j])
+        if r >= _PAIR_THRESHOLD:
+            ops.append(('pair', old_slice[i], new_slice[j]))
+            i += 1
+            j += 1
+            continue
+
+        # Look ahead to decide whether the current old block was deleted or the
+        # current new block was inserted (pick the move that yields a better
+        # upcoming match).
+        r_del = _ratio(old_n[i + 1], new_n[j]) if i + 1 < n_old else 0.0
+        r_ins = _ratio(old_n[i], new_n[j + 1]) if j + 1 < n_new else 0.0
+
+        if r_ins > r_del:
+            ops.append(('add', None, new_slice[j]))
+            j += 1
+        else:
+            ops.append(('del', old_slice[i], None))
+            i += 1
+
+    while i < n_old:
+        ops.append(('del', old_slice[i], None))
+        i += 1
+    while j < n_new:
+        ops.append(('add', None, new_slice[j]))
+        j += 1
+
+    return ops
 
 # ── Highlight palette ────────────────────────────────────────────────────────
 BG_DELETE   = '#ffb3b3'   # pink-red  — deleted text
@@ -196,7 +262,7 @@ def _sidebar_item(kind: str, label: str, old_txt: str, new_txt: str, cid: str) -
 
     return (
         f'<div class="ch {kind}">'
-        f'<a href="{cid}" style="text-decoration:none;color:inherit;display:block">'
+        f'<a href="#{cid}" style="text-decoration:none;color:inherit;display:block">'
         f'<span class="badge {bclass}">{blabel}</span>'
         f'{detail}'
         f'</a>'
@@ -222,8 +288,10 @@ def build_diff_html(old_doc: Document, new_doc: Document) -> Tuple[str, str, str
     old_blocks = old_doc.blocks
     new_blocks = new_doc.blocks
 
-    old_plain = [b.plain_text().strip() for b in old_blocks]
-    new_plain = [b.plain_text().strip() for b in new_blocks]
+    # Match on whitespace-normalized text so that PDF-extraction whitespace
+    # noise (non-breaking spaces, double spaces) does not create false changes.
+    old_plain = [_norm(b.plain_text()) for b in old_blocks]
+    new_plain = [_norm(b.plain_text()) for b in new_blocks]
 
     block_matcher = difflib.SequenceMatcher(None, old_plain, new_plain, autojunk=False)
 
@@ -281,56 +349,51 @@ def build_diff_html(old_doc: Document, new_doc: Document) -> Tuple[str, str, str
                 sidebar_items.append(_sidebar_item('add', 'Added', '', txt, cid))
 
         elif tag == 'replace':
-            old_slice = old_blocks[i1:i2]
-            new_slice = new_blocks[j1:j2]
-            pairs = min(len(old_slice), len(new_slice))
+            # Pair paragraphs by similarity rather than position so that
+            # shifted / revoked / inserted items are not mispaired.
+            for op, ob, nb in _align_replace(old_blocks[i1:i2], new_blocks[j1:j2]):
 
-            for pi in range(pairs):
-                ob, nb = old_slice[pi], new_slice[pi]
-                old_txt = ob.plain_text().strip()
-                new_txt = nb.plain_text().strip()
+                if op == 'pair':
+                    old_txt = ob.plain_text().strip()
+                    new_txt = nb.plain_text().strip()
+                    if not old_txt and not new_txt:
+                        continue
 
-                if not old_txt and not new_txt:
-                    continue
-
-                change_num += 1
-                cid = f'c{change_num}'
-                wold, wnew, ctype = _word_diff_html(ob, nb)
-
-                if ctype == 'equal':
-                    old_parts.append(_p(wold or _render_plain(ob)))
-                    new_parts.append(_p(wnew or _render_plain(nb)))
-                else:
-                    old_parts.append(_p(wold, cid))
-                    new_parts.append(_p(wnew, cid))
-                    if ctype == 'emphasis':
-                        stats['emphasis'] += 1
-                        sidebar_items.append(_sidebar_item('emph', 'Emphasis', old_txt, new_txt, cid))
+                    wold, wnew, ctype = _word_diff_html(ob, nb)
+                    if ctype == 'equal':
+                        old_parts.append(_p(wold or _render_plain(ob)))
+                        new_parts.append(_p(wnew or _render_plain(nb)))
                     else:
-                        stats['modified'] += 1
-                        sidebar_items.append(_sidebar_item('mod', 'Modified', old_txt, new_txt, cid))
+                        change_num += 1
+                        cid = f'c{change_num}'
+                        old_parts.append(_p(wold, cid))
+                        new_parts.append(_p(wnew, cid))
+                        if ctype == 'emphasis':
+                            stats['emphasis'] += 1
+                            sidebar_items.append(_sidebar_item('emph', 'Emphasis', old_txt, new_txt, cid))
+                        else:
+                            stats['modified'] += 1
+                            sidebar_items.append(_sidebar_item('mod', 'Modified', old_txt, new_txt, cid))
 
-            # Unpaired old blocks (excess deletions)
-            for ob in old_slice[pairs:]:
-                txt = ob.plain_text().strip()
-                if not txt:
-                    continue
-                change_num += 1
-                cid = f'c{change_num}'
-                old_parts.append(_p(_render_highlighted(ob, BG_DELETE, diff_strike=True), cid))
-                stats['deleted'] += 1
-                sidebar_items.append(_sidebar_item('del', 'Deleted', txt, '', cid))
+                elif op == 'del':
+                    txt = ob.plain_text().strip()
+                    if not txt:
+                        continue
+                    change_num += 1
+                    cid = f'c{change_num}'
+                    old_parts.append(_p(_render_highlighted(ob, BG_DELETE, diff_strike=True), cid))
+                    stats['deleted'] += 1
+                    sidebar_items.append(_sidebar_item('del', 'Deleted', txt, '', cid))
 
-            # Unpaired new blocks (excess insertions)
-            for nb in new_slice[pairs:]:
-                txt = nb.plain_text().strip()
-                if not txt:
-                    continue
-                change_num += 1
-                cid = f'c{change_num}'
-                new_parts.append(_p(_render_highlighted(nb, BG_INSERT), cid))
-                stats['added'] += 1
-                sidebar_items.append(_sidebar_item('add', 'Added', '', txt, cid))
+                else:  # 'add'
+                    txt = nb.plain_text().strip()
+                    if not txt:
+                        continue
+                    change_num += 1
+                    cid = f'c{change_num}'
+                    new_parts.append(_p(_render_highlighted(nb, BG_INSERT), cid))
+                    stats['added'] += 1
+                    sidebar_items.append(_sidebar_item('add', 'Added', '', txt, cid))
 
     sidebar_html = _build_sidebar(sidebar_items, stats)
     return ''.join(old_parts), ''.join(new_parts), sidebar_html

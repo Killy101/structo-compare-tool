@@ -13,6 +13,33 @@ from PySide6.QtGui import (
 from PySide6.QtCore import QRegularExpression, Qt
 
 
+class _CodeEdit(QTextEdit):
+    """QTextEdit with XML auto-close-tag behaviour."""
+
+    _OPEN_TAG_RE = _re.compile(r'<([A-Za-z_][\w:.-]*)(?:\s[^<>]*)?>$')
+
+    def keyPressEvent(self, event):
+        # Auto-close: when user types '>' that completes an opening tag,
+        # insert the matching closing tag and place the cursor between them.
+        if event.text() == '>':
+            cursor = self.textCursor()
+            line_start = cursor.block().position()
+            prefix = self.toPlainText()[line_start:cursor.position()]
+            super().keyPressEvent(event)
+            candidate = prefix + '>'
+            m = self._OPEN_TAG_RE.search(candidate)
+            if m and not candidate.rstrip().endswith('/>') \
+                    and not candidate.lstrip().startswith('</'):
+                tag = m.group(1)
+                c = self.textCursor()
+                c.insertText(f'</{tag}>')
+                c.movePosition(QTextCursor.MoveOperation.Left,
+                               QTextCursor.MoveMode.MoveAnchor, len(tag) + 3)
+                self.setTextCursor(c)
+            return
+        super().keyPressEvent(event)
+
+
 class _XmlHighlighter(QSyntaxHighlighter):
     def __init__(self, doc):
         super().__init__(doc)
@@ -173,17 +200,18 @@ class XmlEditor(QWidget):
         self._btn_find  = _tbtn('Find',         'Find (Ctrl+F)')
         self._btn_repl  = _tbtn('Replace',      'Find & Replace (Ctrl+H)')
         self._btn_goto  = _tbtn('Go to Line',   'Go to Line (Ctrl+G)')
+        self._btn_cmt   = _tbtn('Comment',      'Toggle comment on selection (Ctrl+/)')
         self._btn_undo  = _tbtn('↩ Undo',       'Undo (Ctrl+Z)')
         self._btn_redo  = _tbtn('↪ Redo',       'Redo (Ctrl+Y)')
 
         for btn in [self._btn_fmt, self._btn_find, self._btn_repl,
-                    self._btn_goto, self._btn_undo, self._btn_redo]:
+                    self._btn_goto, self._btn_cmt, self._btn_undo, self._btn_redo]:
             tb.addWidget(btn)
         tb.addStretch()
         root.addWidget(toolbar)
 
         # ── Editor ───────────────────────────────────────────────────────────
-        self._edit = QTextEdit()
+        self._edit = _CodeEdit()
         mono = QFont('Consolas', 11)
         mono.setStyleHint(QFont.StyleHint.Monospace)
         self._edit.setFont(mono)
@@ -200,6 +228,7 @@ class XmlEditor(QWidget):
         self._btn_find.clicked.connect(self._show_find)
         self._btn_repl.clicked.connect(self._show_find_replace)
         self._btn_goto.clicked.connect(self._goto_line)
+        self._btn_cmt.clicked.connect(self._toggle_comment)
         self._btn_undo.clicked.connect(self._edit.undo)
         self._btn_redo.clicked.connect(self._edit.redo)
 
@@ -208,6 +237,7 @@ class XmlEditor(QWidget):
         QShortcut(QKeySequence('Ctrl+F'),       self).activated.connect(self._show_find)
         QShortcut(QKeySequence('Ctrl+H'),       self).activated.connect(self._show_find_replace)
         QShortcut(QKeySequence('Ctrl+G'),       self).activated.connect(self._goto_line)
+        QShortcut(QKeySequence('Ctrl+/'),       self).activated.connect(self._toggle_comment)
 
         self._find_dlg: _FindReplaceDialog | None = None
 
@@ -263,3 +293,28 @@ class XmlEditor(QWidget):
             cursor.setPosition(block.position())
             self._edit.setTextCursor(cursor)
             self._edit.ensureCursorVisible()
+
+    def _toggle_comment(self):
+        """Wrap/unwrap the selected text (or current line) in an XML comment."""
+        cursor = self._edit.textCursor()
+        if cursor.hasSelection():
+            start, end = cursor.selectionStart(), cursor.selectionEnd()
+        else:
+            block = cursor.block()
+            start, end = block.position(), block.position() + block.length() - 1
+
+        c = self._edit.textCursor()
+        c.setPosition(start)
+        c.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        text = c.selectedText()
+        stripped = text.strip()
+
+        c.beginEditBlock()
+        if stripped.startswith('<!--') and stripped.endswith('-->'):
+            uncommented = text.replace('<!--', '', 1)
+            idx = uncommented.rfind('-->')
+            uncommented = uncommented[:idx] + uncommented[idx + 3:]
+            c.insertText(uncommented.strip())
+        else:
+            c.insertText(f'<!-- {text.strip()} -->')
+        c.endEditBlock()

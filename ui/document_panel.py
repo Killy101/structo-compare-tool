@@ -1,5 +1,6 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QTextBrowser
-from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QTextBrowser, QTextEdit
+from PySide6.QtGui import QTextCursor, QColor
+from PySide6.QtCore import Qt, QTimer
 
 _CSS = """
 <style>
@@ -55,7 +56,44 @@ class DocumentPanel(QWidget):
         )
 
     def scroll_to_anchor(self, anchor: str):
+        if not anchor:
+            return
+        # Move the cursor to the named anchor so the view scrolls reliably,
+        # then flash the surrounding line so the user sees where it landed.
         self.browser.scrollToAnchor(anchor)
+        cursor = self._cursor_at_anchor(anchor)
+        if cursor is not None:
+            self.browser.setTextCursor(cursor)
+            self.browser.ensureCursorVisible()
+            self._flash(cursor)
+
+    def _cursor_at_anchor(self, anchor: str):
+        """Find a text cursor positioned at the block carrying the anchor name."""
+        doc = self.browser.document()
+        block = doc.begin()
+        while block.isValid():
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                if frag.isValid():
+                    names = frag.charFormat().anchorNames()
+                    if anchor in names:
+                        c = self.browser.textCursor()
+                        c.setPosition(frag.position())
+                        return c
+                it += 1
+            block = block.next()
+        return None
+
+    def _flash(self, cursor: QTextCursor):
+        sel = QTextEdit.ExtraSelection()
+        flash_cursor = QTextCursor(cursor)
+        flash_cursor.select(QTextCursor.SelectionType.LineUnderCursor)
+        sel.cursor = flash_cursor
+        sel.format.setBackground(QColor('#fff3a0'))
+        sel.format.setProperty(0x100000 + 1, True)  # FullWidthSelection
+        self.browser.setExtraSelections([sel])
+        QTimer.singleShot(1300, lambda: self.browser.setExtraSelections([]))
 
     def clear(self):
         self.browser.setHtml(_PLACEHOLDER)

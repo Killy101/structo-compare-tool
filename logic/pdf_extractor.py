@@ -54,8 +54,18 @@ def extract_pdf(path: str) -> Document:
             for line in raw_block['lines']:
                 for span_data in line['spans']:
                     flags = span_data['flags']
-                    bold = bool(flags & 16)
-                    italic = bool(flags & 2)
+                    font = span_data.get('font', '').lower()
+                    # Bold/italic may be encoded via the flag bits OR the font name
+                    # (e.g. "TimesNewRomanPS-BoldMT", "Calibri-Italic").
+                    bold = (
+                        bool(flags & 16)
+                        or 'bold' in font or 'black' in font or 'heavy' in font
+                        or 'semibold' in font
+                    )
+                    italic = (
+                        bool(flags & 2)
+                        or 'italic' in font or 'oblique' in font
+                    )
 
                     span_rect = fitz.Rect(span_data['bbox'])
 
