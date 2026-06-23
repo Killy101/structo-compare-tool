@@ -3,24 +3,43 @@ from models.document import Document, TextBlock, TextSpan
 
 
 def _check_line_overlap(span_rect, drawings, mid_y_frac: float, tolerance_frac: float) -> bool:
-    """Check if any drawn horizontal line intersects the span at the given vertical fraction."""
+    """
+    Check if any drawn horizontal mark (line or thin filled rectangle) intersects
+    the span at the given vertical fraction.  Word-generated PDFs often encode
+    strikethrough / underline as a very thin filled rectangle ('re' item) rather
+    than a vector line ('l' item).
+    """
     span_h = span_rect.y1 - span_rect.y0
+    if span_h <= 0:
+        return False
     target_y = span_rect.y0 + span_h * mid_y_frac
+    tol = span_h * tolerance_frac
 
     for path in drawings:
         for item in path.get('items', []):
-            if item[0] != 'l':
-                continue
-            p1, p2 = item[1], item[2]
-            if abs(p1.y - p2.y) > 2:
-                continue
-            line_y = (p1.y + p2.y) / 2
-            if abs(line_y - target_y) > span_h * tolerance_frac:
-                continue
-            line_x0 = min(p1.x, p2.x)
-            line_x1 = max(p1.x, p2.x)
-            if line_x0 <= span_rect.x1 and line_x1 >= span_rect.x0:
-                return True
+            kind = item[0]
+
+            if kind == 'l':
+                p1, p2 = item[1], item[2]
+                if abs(p1.y - p2.y) > 2:
+                    continue
+                line_y = (p1.y + p2.y) / 2
+                if abs(line_y - target_y) > tol:
+                    continue
+                if min(p1.x, p2.x) <= span_rect.x1 and max(p1.x, p2.x) >= span_rect.x0:
+                    return True
+
+            elif kind == 're':
+                # Thin horizontal rectangle used as a rule (strikethrough or underline)
+                rect = item[1]
+                if rect.height > 4:          # too tall to be a rule
+                    continue
+                rect_mid_y = (rect.y0 + rect.y1) / 2
+                if abs(rect_mid_y - target_y) > tol:
+                    continue
+                if rect.x0 <= span_rect.x1 and rect.x1 >= span_rect.x0:
+                    return True
+
     return False
 
 
