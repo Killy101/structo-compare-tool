@@ -18,9 +18,17 @@ _CSS = """
   span[style*="font-weight:bold"]   { font-weight: bold; }
   i, em,
   span[style*="font-style:italic"]  { font-style: italic; }
-  s, del, strike,
+
+  /* Source-PDF text decorations — inline styles carry the authoritative value;
+     these rules are fallbacks for Qt's renderer.  The combined rule must come
+     LAST so it wins when both decorations are present (higher specificity via
+     two attribute selectors). */
+  s, del, strike                    { text-decoration: line-through; }
   span[style*="line-through"]       { text-decoration: line-through; }
   span[style*="underline"]          { text-decoration: underline; }
+  span[style*="underline"][style*="line-through"] {
+    text-decoration: underline line-through;
+  }
 
   span[style*="background:#ffb3b3"] { background: #ffb3b3; border-radius: 3px; }
   span[style*="background:#b3ffb3"] { background: #b3ffb3; border-radius: 3px; }
