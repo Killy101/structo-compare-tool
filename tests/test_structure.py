@@ -52,3 +52,40 @@ def test_indent_round_trips_through_edit_parser():
     from logic.text_parser import text_to_doc
     text = 'Heading\n\n    nested item\n        deeper'
     assert text_to_doc(text).display_text() == text
+
+
+def test_resegmentation_is_not_a_change():
+    """Same words, paragraph split moved -> word-stream diff sees no change."""
+    old = _doc([(0, 'alpha beta gamma delta epsilon zeta eta theta')])
+    new = _doc([(0, 'alpha beta gamma delta'), (0, 'epsilon zeta eta theta')])
+    _, _, _, changes = build_diff_html(old, new)
+    assert changes == []
+
+
+def test_modification_is_paired_del_add_and_highlighted():
+    old = _doc([(0, 'the contribution rate is 4 percent annually')])
+    new = _doc([(0, 'the contribution rate is 3 percent annually')])
+    old_html, new_html, sidebar, changes = build_diff_html(old, new)
+    assert len(changes) == 1
+    assert changes[0] == {'id': 'c1', 'kind': 'mod', 'old': '4', 'new': '3'}
+    assert '#ffb3b3' in old_html      # deleted word red in old panel
+    assert '#b3ffb3' in new_html      # added word green in new panel
+    assert 'bmod' in sidebar          # orange "Modified" badge in change list
+
+
+def test_pure_addition_is_green_only():
+    old = _doc([(0, 'line one'), (0, 'line two')])
+    new = _doc([(0, 'line one'), (0, 'inserted line'), (0, 'line two')])
+    old_html, new_html, _, changes = build_diff_html(old, new)
+    assert [c['kind'] for c in changes] == ['add']
+    assert '#b3ffb3' in new_html
+    assert '#ffb3b3' not in old_html
+
+
+def test_pure_deletion_is_red_only():
+    old = _doc([(0, 'keep this'), (0, 'remove this entirely'), (0, 'keep that')])
+    new = _doc([(0, 'keep this'), (0, 'keep that')])
+    old_html, new_html, _, changes = build_diff_html(old, new)
+    assert [c['kind'] for c in changes] == ['del']
+    assert '#ffb3b3' in old_html
+    assert '#b3ffb3' not in new_html

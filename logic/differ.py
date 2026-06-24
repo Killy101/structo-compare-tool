@@ -1,88 +1,33 @@
 # logic/differ.py
 """
-Two‑pass diff for ``Document`` objects.
+Word‑stream diff for ``Document`` objects.
 
-Pass 1 – block‑level alignment (paragraphs).  
-Pass 2 – word‑level diff inside the “replace” blocks.
+Change detection runs on a **flat stream of words** spanning the whole
+document, *independent of paragraph / line boundaries*.  This is the key to
+accuracy: PDF line wrapping and paragraph segmentation are layout artifacts,
+not content, and they routinely differ between two versions of the same file.
+A block‑level diff mistakes those layout shifts for content changes and emits
+large numbers of false "modified" / "deleted" / "added" paragraphs.  Diffing
+the flat word stream makes reflow and re‑segmentation invisible, so only real
+word‑level edits remain.
 
-Only **content changes** (added / deleted / modified words) are highlighted.
-Formatting‑only differences (bold / italic / underline / strikethrough)
-are ignored, which eliminates the majority of false positives that
-previously arose from the PDF extractor’s styling information.
+The detected changes are then rendered back onto each document's paragraph
+structure: changed words in the old panel are highlighted red, changed words
+in the new panel green, and a paired delete+insert is reported as a single
+"modified" entry (orange) in the change list.
 
-The function returns three HTML fragments:
-    (old_panel_html, new_panel_html, sidebar_html)
-that the UI can drop straight into the two side‑by‑side ``QTextEdit``s and
-the change‑list ``QTextBrowser``.
+``build_diff_html`` returns ``(old_html, new_html, sidebar_html, changes)``.
 """
 import difflib
 import html as _html
-import re as _re
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import Iterator, List, Tuple
 
-from models.document import Document, TextBlock
-
-
-# -----------------------------------------------------------------------
-# Helper: normalise whitespace so that “double spaces”, NBSP, etc.
-# -----------------------------------------------------------------------
-def _norm(text: str) -> str:
-    """Collapse any run of whitespace (including non‑breaking spaces) to a single space."""
-    return _re.sub(r"\s+", " ", text.replace("\xa0", " ")).strip()
-
-
-def _ratio(a: str, b: str) -> float:
-    """Similarity ratio used by the block‑aligner."""
-    return difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
+from models.document import Document, TextBlock, TextSpan
 
 
 # -----------------------------------------------------------------------
-# Pair‑wise “replace” alignment – tries to avoid pairing unrelated
-# paragraphs just because they happen to be at the same index.
-# -----------------------------------------------------------------------
-_PAIR_THRESHOLD = 0.4  # Minimum similarity for two paragraphs to be considered a “pair”.
-
-def _align_replace(old_slice: List[TextBlock], new_slice: List[TextBlock]) -> List[tuple]:
-    """Return an ordered list of operations that best aligns the two slices."""
-    old_norm = [_norm(b.plain_text()) for b in old_slice]
-    new_norm = [_norm(b.plain_text()) for b in new_slice]
-
-    ops: List[tuple] = []
-    i = j = 0
-    n_old, n_new = len(old_slice), len(new_slice)
-
-    while i < n_old and j < n_new:
-        sim = _ratio(old_norm[i], new_norm[j])
-        if sim >= _PAIR_THRESHOLD:
-            ops.append(("pair", old_slice[i], new_slice[j]))
-            i += 1
-            j += 1
-            continue
-
-        # Look ahead to decide what to do.
-        del_next = _ratio(old_norm[i + 1], new_norm[j]) if i + 1 < n_old else 0.0
-        ins_next = _ratio(old_norm[i], new_norm[j + 1]) if j + 1 < n_new else 0.0
-
-        if ins_next > del_next:
-            ops.append(("add", None, new_slice[j]))
-            j += 1
-        else:
-            ops.append(("del", old_slice[i], None))
-            i += 1
-
-    while i < n_old:
-        ops.append(("del", old_slice[i], None))
-        i += 1
-    while j < n_new:
-        ops.append(("add", None, new_slice[j]))
-        j += 1
-
-    return ops
-
-
-# -----------------------------------------------------------------------
-# Token class – represents a *single word* together with its source formatting.
+# Token – a single word together with its source formatting.
 # -----------------------------------------------------------------------
 @dataclass
 class _Token:
@@ -92,14 +37,8 @@ class _Token:
     src_strike: bool = False
     underline: bool = False
 
-    @property
-    def is_newline(self) -> bool:
-        return self.word == "\n"
-
-    def render(self, bg: str = "", diff_strike: bool = False) -> str:
+    def render(self, bg: str = "") -> str:
         """Render the token as a ``<span>`` with the appropriate CSS."""
-        if self.is_newline:
-            return "<br/>"
         t = _html.escape(self.word)
         styles: List[str] = []
         decorations: List[str] = []
@@ -114,8 +53,6 @@ class _Token:
             decorations.append("line-through")
             if not bg:
                 styles.append("color:#888")
-        elif diff_strike:
-            decorations.append("line-through")
 
         if decorations:
             styles.append("text-decoration:" + " ".join(decorations))
@@ -130,109 +67,66 @@ class _Token:
 
 
 # -----------------------------------------------------------------------
-# Rendering helpers (plain paragraph, highlighted paragraph, word‑level diff)
+# Flatten a document into a word stream.
 # -----------------------------------------------------------------------
-def _block_tokens(block: TextBlock) -> List[_Token]:
-    tokens: List[_Token] = []
+def _block_words(block: TextBlock) -> Iterator[Tuple[str, TextSpan]]:
+    """Yield ``(word, span)`` pairs for every word in a block, in order."""
     for span in block.spans:
         for word in span.text.split():
             if word:
-                tokens.append(
-                    _Token(
-                        word=word,
-                        bold=span.bold,
-                        italic=span.italic,
-                        src_strike=span.strikethrough,
-                        underline=span.underline,
-                    )
-                )
-    return tokens
+                yield word, span
 
 
-def _render_plain(block: TextBlock) -> str:
-    """Paragraph without any change highlighting."""
-    parts = []
-    for span in block.spans:
-        for word in span.text.split():
-            if word:
-                parts.append(
-                    _Token(
-                        word=word,
-                        bold=span.bold,
-                        italic=span.italic,
-                        src_strike=span.strikethrough,
-                        underline=span.underline,
-                    ).render()
-                    + " "
-                )
-    return "".join(parts).rstrip()
+def _flatten(blocks: List[TextBlock]) -> List[str]:
+    """Return the document's words as a flat list (blank blocks skipped)."""
+    words: List[str] = []
+    for block in blocks:
+        if block.is_blank():
+            continue
+        for word, _span in _block_words(block):
+            words.append(word)
+    return words
 
 
-def _render_highlighted(block: TextBlock, bg: str, diff_strike: bool = False) -> str:
-    """Paragraph where *every* word gets the same background colour."""
-    parts = []
-    for span in block.spans:
-        for word in span.text.split():
-            if word:
-                parts.append(
-                    _Token(
-                        word=word,
-                        bold=span.bold,
-                        italic=span.italic,
-                        src_strike=span.strikethrough,
-                        underline=span.underline,
-                    ).render(bg=bg, diff_strike=diff_strike)
-                    + " "
-                )
-    return "".join(parts).rstrip()
+# -----------------------------------------------------------------------
+# Render one panel, highlighting changed words and dropping nav anchors.
+# -----------------------------------------------------------------------
+def _p(inner: str, indent: int = 0) -> str:
+    """Wrap *inner* in a paragraph, reproducing the source indentation with
+    non‑breaking spaces (the panels normalise these back when re‑extracting)."""
+    pad = "&nbsp;" * indent if indent else ""
+    return f'<p style="margin:3px 0;line-height:1.6">{pad}{inner}</p>\n'
 
 
-def _word_diff_html(old_block: TextBlock, new_block: TextBlock) -> Tuple[str, str, str]:
+def _render_panel(blocks: List[TextBlock], changed: List[bool],
+                  anchors: dict, bg: str) -> str:
+    """Render *blocks*, highlighting words whose flat index is flagged in
+    *changed* and emitting a navigation anchor where *anchors* has one.
+
+    The word iteration order here is identical to :func:`_flatten`, so the
+    running global index ``g`` stays aligned with ``changed`` / ``anchors``.
     """
-    Word‑level diff for a *matched* pair of blocks.
-    Returns (old_html, new_html, change_type) where ``change_type`` is
-    ``'equal'`` or ``'modified'``.
-    """
-    old_tok = _block_tokens(old_block)
-    new_tok = _block_tokens(new_block)
-
-    matcher = difflib.SequenceMatcher(
-        None,
-        [t.word for t in old_tok],
-        [t.word for t in new_tok],
-        autojunk=False,
-    )
-
-    old_parts: List[str] = []
-    new_parts: List[str] = []
-    has_content_change = False
-
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
-            for oi in range(i1, i2):
-                old_parts.append(old_tok[oi].render() + " ")
-            for ni in range(j1, j2):
-                new_parts.append(new_tok[ni].render() + " ")
-
-        elif tag == "delete":
-            has_content_change = True
-            for tok in old_tok[i1:i2]:
-                old_parts.append(tok.render(bg="#ffb3b3") + " ")
-
-        elif tag == "insert":
-            has_content_change = True
-            for tok in new_tok[j1:j2]:
-                new_parts.append(tok.render(bg="#b3ffb3") + " ")
-
-        elif tag == "replace":
-            has_content_change = True
-            for tok in old_tok[i1:i2]:
-                old_parts.append(tok.render(bg="#ffb3b3") + " ")
-            for tok in new_tok[j1:j2]:
-                new_parts.append(tok.render(bg="#b3ffb3") + " ")
-
-    change_type = "modified" if has_content_change else "equal"
-    return "".join(old_parts).rstrip(), "".join(new_parts).rstrip(), change_type
+    out: List[str] = []
+    g = 0
+    for block in blocks:
+        if block.is_blank():
+            out.append(_p(""))
+            continue
+        pieces: List[str] = []
+        for word, span in _block_words(block):
+            tok = _Token(
+                word=word,
+                bold=span.bold,
+                italic=span.italic,
+                src_strike=span.strikethrough,
+                underline=span.underline,
+            )
+            cid = anchors.get(g)
+            a_tag = f'<a name="{cid}">&#8203;</a>' if cid else ""
+            pieces.append(a_tag + tok.render(bg=bg if changed[g] else ""))
+            g += 1
+        out.append(_p(" ".join(pieces), indent=block.indent))
+    return "".join(out)
 
 
 # -----------------------------------------------------------------------
@@ -243,11 +137,10 @@ def _truncate(text: str, limit: int = 120) -> str:
 
 
 def _sidebar_item(kind: str, label: str, old_txt: str, new_txt: str, cid: str) -> str:
-    """
-    Render a single entry for the changes‑sidebar.
+    """Render a single entry for the changes‑sidebar.
 
-    ``kind`` is one of ``del`` / ``add`` / ``mod`` and determines the colour
-    and the anchor fragment used for navigation.
+    ``kind`` is one of ``del`` / ``add`` / ``mod`` and drives the colour and
+    the anchor fragment used for navigation.
     """
     badge_map = {
         "del": ("bdel", "Deleted"),
@@ -282,139 +175,76 @@ def _sidebar_item(kind: str, label: str, old_txt: str, new_txt: str, cid: str) -
     )
 
 
-def _p(inner: str, anchor: str = "", indent: int = 0) -> str:
-    """Wrap *inner* in a paragraph; add a zero‑width‑space anchor if requested.
-
-    ``indent`` reproduces the source document's leading whitespace using
-    non‑breaking spaces so the side‑by‑side view keeps its layout. The
-    panels normalise these back to plain spaces when text is re‑extracted.
-    """
-    a_tag = f'<a name="{anchor}">&#8203;</a>' if anchor else ""
-    pad = "&nbsp;" * indent if indent else ""
-    return f'<p style="margin:3px 0;line-height:1.6">{a_tag}{pad}{inner}</p>\n'
-
-
 # -----------------------------------------------------------------------
-# Main diff entry point (unchanged)
+# Main diff entry point
 # -----------------------------------------------------------------------
 def build_diff_html(old_doc: Document, new_doc: Document) -> Tuple[str, str, str, list]:
     """
-    Two‑pass diff:
-        1.  Block‑level alignment (paragraphs)
-        2.  Word‑level diff inside the “replace” pairs
+    Flat word‑stream diff.
 
-    Returns ``(old_html, new_html, sidebar_html, changes)`` suitable for
-    insertion into the UI panels.  ``changes`` is an ordered list of
-    ``{"id", "kind", "old", "new"}`` dicts used for change‑to‑change
-    navigation.
+    Returns ``(old_html, new_html, sidebar_html, changes)`` where ``changes``
+    is an ordered list of ``{"id", "kind", "old", "new"}`` dicts used for
+    change‑to‑change navigation.
     """
     old_blocks = old_doc.blocks
     new_blocks = new_doc.blocks
 
-    # Normalise whitespace for block comparison.
-    old_plain = [_norm(b.plain_text()) for b in old_blocks]
-    new_plain = [_norm(b.plain_text()) for b in new_blocks]
+    old_words = _flatten(old_blocks)
+    new_words = _flatten(new_blocks)
 
-    block_matcher = difflib.SequenceMatcher(
-        None, old_plain, new_plain, autojunk=False
-    )
+    matcher = difflib.SequenceMatcher(None, old_words, new_words, autojunk=False)
 
-    old_parts: List[str] = []
-    new_parts: List[str] = []
+    old_changed = [False] * len(old_words)
+    new_changed = [False] * len(new_words)
+    old_anchors: dict = {}
+    new_anchors: dict = {}
+
     sidebar_items: List[str] = []
     changes: List[dict] = []
-    change_num = 0
     stats = {"added": 0, "deleted": 0, "modified": 0}
+    cnum = 0
 
-    for tag, i1, i2, j1, j2 in block_matcher.get_opcodes():
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == "equal":
-            for bi, bj in zip(range(i1, i2), range(j1, j2)):
-                ob, nb = old_blocks[bi], new_blocks[bj]
-                old_parts.append(_p(_render_plain(ob), indent=ob.indent))
-                new_parts.append(_p(_render_plain(nb), indent=nb.indent))
+            continue
 
+        cnum += 1
+        cid = f"c{cnum}"
+        for k in range(i1, i2):
+            old_changed[k] = True
+        for k in range(j1, j2):
+            new_changed[k] = True
+
+        old_txt = " ".join(old_words[i1:i2])
+        new_txt = " ".join(new_words[j1:j2])
+
+        if tag == "insert":
+            kind = "add"
+            stats["added"] += 1
+            new_anchors[j1] = cid
+            sidebar_items.append(_sidebar_item("add", "Added", "", new_txt, cid))
         elif tag == "delete":
-            for b in old_blocks[i1:i2]:
-                txt = b.plain_text().strip()
-                if not txt:
-                    old_parts.append(_p(""))
-                    continue
-                change_num += 1
-                cid = f"c{change_num}"
-                old_parts.append(_p(_render_highlighted(b, "#ffb3b3"), cid, b.indent))
-                stats["deleted"] += 1
-                sidebar_items.append(_sidebar_item("del", "Deleted", txt, "", cid))
-                changes.append({"id": cid, "kind": "del", "old": txt, "new": ""})
+            kind = "del"
+            stats["deleted"] += 1
+            old_anchors[i1] = cid
+            sidebar_items.append(_sidebar_item("del", "Deleted", old_txt, "", cid))
+        else:  # replace -> modification (paired delete + insert)
+            kind = "mod"
+            stats["modified"] += 1
+            old_anchors[i1] = cid
+            new_anchors[j1] = cid
+            sidebar_items.append(_sidebar_item("mod", "Modified", old_txt, new_txt, cid))
 
-        elif tag == "insert":
-            for b in new_blocks[j1:j2]:
-                txt = b.plain_text().strip()
-                if not txt:
-                    new_parts.append(_p(""))
-                    continue
-                change_num += 1
-                cid = f"c{change_num}"
-                new_parts.append(_p(_render_highlighted(b, "#b3ffb3"), cid, b.indent))
-                stats["added"] += 1
-                sidebar_items.append(_sidebar_item("add", "Added", "", txt, cid))
-                changes.append({"id": cid, "kind": "add", "old": "", "new": txt})
+        changes.append({"id": cid, "kind": kind, "old": old_txt, "new": new_txt})
 
-        elif tag == "replace":
-            # Align paragraphs by similarity, not by position.
-            aligned_ops = _align_replace(
-                old_blocks[i1:i2], new_blocks[j1:j2]
-            )
-            for op, ob, nb in aligned_ops:
-                if op == "pair":
-                    old_txt = ob.plain_text().strip()
-                    new_txt = nb.plain_text().strip()
-                    if not old_txt and not new_txt:
-                        continue
-
-                    w_old, w_new, ctype = _word_diff_html(ob, nb)
-                    if ctype == "equal":
-                        old_parts.append(_p(_render_plain(ob), indent=ob.indent))
-                        new_parts.append(_p(_render_plain(nb), indent=nb.indent))
-                    else:
-                        change_num += 1
-                        cid = f"c{change_num}"
-                        old_parts.append(_p(w_old, cid, ob.indent))
-                        new_parts.append(_p(w_new, cid, nb.indent))
-                        stats["modified"] += 1
-                        sidebar_items.append(
-                            _sidebar_item("mod", "Modified", old_txt, new_txt, cid)
-                        )
-                        changes.append({"id": cid, "kind": "mod",
-                                        "old": old_txt, "new": new_txt})
-
-                elif op == "del":
-                    txt = ob.plain_text().strip()
-                    if not txt:
-                        continue
-                    change_num += 1
-                    cid = f"c{change_num}"
-                    old_parts.append(_p(_render_highlighted(ob, "#ffb3b3"), cid, ob.indent))
-                    stats["deleted"] += 1
-                    sidebar_items.append(_sidebar_item("del", "Deleted", txt, "", cid))
-                    changes.append({"id": cid, "kind": "del", "old": txt, "new": ""})
-
-                else:  # op == "add"
-                    txt = nb.plain_text().strip()
-                    if not txt:
-                        continue
-                    change_num += 1
-                    cid = f"c{change_num}"
-                    new_parts.append(_p(_render_highlighted(nb, "#b3ffb3"), cid, nb.indent))
-                    stats["added"] += 1
-                    sidebar_items.append(_sidebar_item("add", "Added", "", txt, cid))
-                    changes.append({"id": cid, "kind": "add", "old": "", "new": txt})
-
+    old_html = _render_panel(old_blocks, old_changed, old_anchors, "#ffb3b3")
+    new_html = _render_panel(new_blocks, new_changed, new_anchors, "#b3ffb3")
     sidebar_html = _build_sidebar(sidebar_items, stats)
-    return "".join(old_parts), "".join(new_parts), sidebar_html, changes
+    return old_html, new_html, sidebar_html, changes
 
 
 # -----------------------------------------------------------------------
-# Sidebar builder (unchanged)
+# Sidebar builder
 # -----------------------------------------------------------------------
 def _build_sidebar(items: List[str], stats: dict) -> str:
     total = sum(stats.values())
