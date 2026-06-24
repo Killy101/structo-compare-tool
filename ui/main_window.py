@@ -4,10 +4,10 @@ import traceback
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget,
     QSplitter, QPushButton, QFileDialog, QStatusBar,
-    QLabel, QTextBrowser, QProgressBar, QCheckBox, QFrame,
+    QLabel, QTextBrowser, QProgressBar, QCheckBox, QFrame, QLineEdit,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QUrl
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QKeySequence, QShortcut, QTextDocument
 
 from ui.document_panel import DocumentPanel
 from ui.xml_editor import XmlEditor
@@ -439,6 +439,57 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.btn_save)
         root.addWidget(toolbar)
 
+        # ── Search bar (Ctrl+F, hidden by default) ────────────────────────────
+        search_bar = QWidget()
+        search_bar.setVisible(False)
+        search_bar.setStyleSheet('background:#2b2d42;border-bottom:1px solid #1a1a2e;')
+        search_bar.setFixedHeight(42)
+        self._search_bar = search_bar
+        sb_lay = QHBoxLayout(search_bar)
+        sb_lay.setContentsMargins(12, 6, 12, 6)
+        sb_lay.setSpacing(6)
+
+        sb_lbl = QLabel('Find:')
+        sb_lbl.setStyleSheet('color:#cdd6f4;font-size:12px;background:transparent;')
+
+        self._search_input = QLineEdit()
+        self._search_input.setPlaceholderText('Search in both panels…')
+        self._search_input.setFixedWidth(280)
+        self._search_input.setStyleSheet(
+            'QLineEdit{background:#1e1e38;color:#cdd6f4;border:1px solid #45475a;'
+            'border-radius:3px;padding:3px 8px;font-size:12px;}'
+            'QLineEdit:focus{border:1px solid #7c7faf;}'
+        )
+
+        self._search_count_lbl = QLabel('')
+        self._search_count_lbl.setFixedWidth(120)
+        self._search_count_lbl.setStyleSheet('color:#a6adc8;font-size:11px;background:transparent;')
+
+        _sbtn_ss = (
+            'QPushButton{background:#3a3a6a;color:#cdd6f4;border:none;'
+            'border-radius:3px;padding:3px 10px;font-size:11px;}'
+            'QPushButton:hover{background:#4a4a8a;}'
+        )
+        btn_prev = QPushButton('▲ Prev')
+        btn_prev.setStyleSheet(_sbtn_ss)
+        btn_next = QPushButton('Next ▼')
+        btn_next.setStyleSheet(_sbtn_ss)
+        btn_close_search = QPushButton('✕')
+        btn_close_search.setFixedWidth(28)
+        btn_close_search.setStyleSheet(
+            'QPushButton{background:#45475a;color:#cdd6f4;border:none;border-radius:3px;font-size:11px;}'
+            'QPushButton:hover{background:#585b70;}'
+        )
+
+        sb_lay.addWidget(sb_lbl)
+        sb_lay.addWidget(self._search_input)
+        sb_lay.addWidget(self._search_count_lbl)
+        sb_lay.addStretch()
+        sb_lay.addWidget(btn_prev)
+        sb_lay.addWidget(btn_next)
+        sb_lay.addWidget(btn_close_search)
+        root.addWidget(search_bar)
+
         # ── Old PDF panel ─────────────────────────────────────────────────────
         old_wrap = QWidget()
         ow = QVBoxLayout(old_wrap)
@@ -464,28 +515,72 @@ class MainWindow(QMainWindow):
         pdf_splitter.setSizes([800, 800])
         pdf_splitter.setHandleWidth(4)
 
-        # ── XML Editor ────────────────────────────────────────────────────────
+        # ── XML Editor (collapsible) ──────────────────────────────────────────
         xml_wrap = QWidget()
+        self._xml_wrap = xml_wrap
         xw = QVBoxLayout(xml_wrap)
         xw.setContentsMargins(0, 0, 0, 0)
         xw.setSpacing(0)
-        xw.addWidget(_panel_header('XML Editor'))
+
+        xml_hdr = QWidget()
+        xml_hdr.setStyleSheet('background:#2b2d42;')
+        xml_hdr.setFixedHeight(28)
+        xml_hdr_lay = QHBoxLayout(xml_hdr)
+        xml_hdr_lay.setContentsMargins(10, 0, 6, 0)
+        xml_hdr_lbl = QLabel('XML Editor')
+        xml_hdr_lbl.setStyleSheet(
+            'color:#edf2f4;font-size:12px;font-weight:bold;'
+            'letter-spacing:0.5px;background:transparent;'
+        )
+        self._btn_toggle_xml = QPushButton('▼ Hide')
+        self._btn_toggle_xml.setFixedSize(58, 20)
+        self._btn_toggle_xml.setStyleSheet(
+            'QPushButton{background:#3a3a5a;color:#a6adc8;border:none;'
+            'border-radius:3px;font-size:10px;}'
+            'QPushButton:hover{background:#4a4a7a;color:#cdd6f4;}'
+        )
+        xml_hdr_lay.addWidget(xml_hdr_lbl, 1)
+        xml_hdr_lay.addWidget(self._btn_toggle_xml)
+        xw.addWidget(xml_hdr)
+
         self.xml_editor = XmlEditor()
         xw.addWidget(self.xml_editor)
 
-        left_splitter = QSplitter(Qt.Orientation.Vertical)
-        left_splitter.addWidget(pdf_splitter)
-        left_splitter.addWidget(xml_wrap)
-        left_splitter.setSizes([560, 280])
-        left_splitter.setHandleWidth(4)
+        self._left_splitter = QSplitter(Qt.Orientation.Vertical)
+        self._left_splitter.addWidget(pdf_splitter)
+        self._left_splitter.addWidget(xml_wrap)
+        self._left_splitter.setSizes([560, 280])
+        self._left_splitter.setHandleWidth(4)
 
-        # ── Changes sidebar ───────────────────────────────────────────────────
+        # ── Changes sidebar (collapsible) ─────────────────────────────────────
         sidebar_wrap = QWidget()
-        sidebar_wrap.setMinimumWidth(240)
+        sidebar_wrap.setMinimumWidth(28)
+        self._sidebar_wrap = sidebar_wrap
         sw = QVBoxLayout(sidebar_wrap)
         sw.setContentsMargins(0, 0, 0, 0)
         sw.setSpacing(0)
-        sw.addWidget(_panel_header('Changes'))
+
+        sidebar_hdr = QWidget()
+        sidebar_hdr.setStyleSheet('background:#2b2d42;')
+        sidebar_hdr.setFixedHeight(28)
+        sidebar_hdr_lay = QHBoxLayout(sidebar_hdr)
+        sidebar_hdr_lay.setContentsMargins(10, 0, 6, 0)
+        sidebar_hdr_lbl = QLabel('Changes')
+        sidebar_hdr_lbl.setStyleSheet(
+            'color:#edf2f4;font-size:12px;font-weight:bold;'
+            'letter-spacing:0.5px;background:transparent;'
+        )
+        self._btn_toggle_sidebar = QPushButton('◀ Hide')
+        self._btn_toggle_sidebar.setFixedSize(58, 20)
+        self._btn_toggle_sidebar.setStyleSheet(
+            'QPushButton{background:#3a3a5a;color:#a6adc8;border:none;'
+            'border-radius:3px;font-size:10px;}'
+            'QPushButton:hover{background:#4a4a7a;color:#cdd6f4;}'
+        )
+        sidebar_hdr_lay.addWidget(sidebar_hdr_lbl, 1)
+        sidebar_hdr_lay.addWidget(self._btn_toggle_sidebar)
+        sw.addWidget(sidebar_hdr)
+
         self.sidebar = QTextBrowser()
         self.sidebar.setStyleSheet('background:#1e1e2e;border:none;')
         self.sidebar.setOpenLinks(False)
@@ -496,12 +591,12 @@ class MainWindow(QMainWindow):
         )
         sw.addWidget(self.sidebar)
 
-        main_splitter = QSplitter(Qt.Orientation.Horizontal)
-        main_splitter.addWidget(left_splitter)
-        main_splitter.addWidget(sidebar_wrap)
-        main_splitter.setSizes([1260, 310])
-        main_splitter.setHandleWidth(4)
-        root.addWidget(main_splitter, 1)
+        self._main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._main_splitter.addWidget(self._left_splitter)
+        self._main_splitter.addWidget(sidebar_wrap)
+        self._main_splitter.setSizes([1260, 310])
+        self._main_splitter.setHandleWidth(4)
+        root.addWidget(self._main_splitter, 1)
 
         # ── Legend bar ────────────────────────────────────────────────────────
         legend_bar = QWidget()
@@ -511,19 +606,29 @@ class MainWindow(QMainWindow):
         leg.addWidget(QLabel('<b>Legend:</b>'))
         leg.addSpacing(6)
         for color, label in [
-            ('#ffb3b3', 'Deleted'),
+            ('#ffb3b3', 'Removed'),
             ('#b3ffb3', 'Added'),
-            ('#ffffa0', 'Modified (new)'),
-            ('#ffd6d6', 'Modified (old)'),
         ]:
             leg.addWidget(_legend_chip(color, label))
             leg.addSpacing(4)
         leg.addStretch()
         leg.addWidget(QLabel(
             '<span style="color:#888;font-size:11px">'
-            'Bold <b>B</b> · Italic <i>I</i> · Strike <s>S</s></span>'
+            'Red = deleted / modified old words  ·  '
+            'Green = added / modified new words</span>'
         ))
         root.addWidget(legend_bar)
+
+        # Wire up search bar buttons
+        self._search_input.textChanged.connect(self._on_search_changed)
+        self._search_input.returnPressed.connect(self._search_next)
+        btn_next.clicked.connect(self._search_next)
+        btn_prev.clicked.connect(self._search_prev)
+        btn_close_search.clicked.connect(self._close_search)
+
+        # Wire up collapse buttons
+        self._btn_toggle_sidebar.clicked.connect(self._toggle_sidebar)
+        self._btn_toggle_xml.clicked.connect(self._toggle_xml)
 
         return container
 
@@ -538,6 +643,8 @@ class MainWindow(QMainWindow):
         self.btn_export.clicked.connect(self._export_html)
         self.btn_save.clicked.connect(self._save_xml)
         QShortcut(QKeySequence('Ctrl+S'), self).activated.connect(self._save_xml)
+        QShortcut(QKeySequence('Ctrl+F'), self).activated.connect(self._open_search)
+        QShortcut(QKeySequence('Escape'), self._search_bar).activated.connect(self._close_search)
 
         # Sync scroll
         self._sync_cb.toggled.connect(self._on_sync_toggled)
@@ -673,8 +780,6 @@ class MainWindow(QMainWindow):
   p { margin: 3px 0; line-height: 1.6; }
   span[style*="background:#ffb3b3"] { background:#ffb3b3; border-radius:3px; }
   span[style*="background:#b3ffb3"] { background:#b3ffb3; border-radius:3px; }
-  span[style*="background:#ffffa0"] { background:#ffffa0; border-radius:3px; }
-  span[style*="background:#ffd6d6"] { background:#ffd6d6; border-radius:3px; }
 </style>"""
         return f"""<!DOCTYPE html>
 <html lang="en">
@@ -687,10 +792,8 @@ class MainWindow(QMainWindow):
 <h1>Structo Compare</h1>
 <div class="legend">
   <b>Legend:</b>
-  <span class="chip" style="background:#ffb3b3">Deleted</span>
+  <span class="chip" style="background:#ffb3b3">Removed</span>
   <span class="chip" style="background:#b3ffb3">Added</span>
-  <span class="chip" style="background:#ffffa0">Modified (new)</span>
-  <span class="chip" style="background:#ffd6d6">Modified (old)</span>
 </div>
 <div class="panels">
   <div class="panel">
@@ -797,3 +900,82 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._status.showMessage(f'Save error: {e}')
             self._set_saved_state('✕ Save failed', '#f38ba8')
+
+    # ── Collapse / expand panels ──────────────────────────────────────────────
+    def _toggle_sidebar(self):
+        visible = self.sidebar.isVisible()
+        self.sidebar.setVisible(not visible)
+        if visible:
+            self._btn_toggle_sidebar.setText('▶ Show')
+            self._sidebar_wrap.setMaximumWidth(80)
+        else:
+            self._btn_toggle_sidebar.setText('◀ Hide')
+            self._sidebar_wrap.setMaximumWidth(16777215)  # Qt default max
+            self._main_splitter.setSizes([1260, 310])
+
+    def _toggle_xml(self):
+        visible = self.xml_editor.isVisible()
+        self.xml_editor.setVisible(not visible)
+        if visible:
+            self._btn_toggle_xml.setText('▲ Show')
+            self._left_splitter.setSizes([9999, 0])
+        else:
+            self._btn_toggle_xml.setText('▼ Hide')
+            self._left_splitter.setSizes([560, 280])
+
+    # ── Search bar ────────────────────────────────────────────────────────────
+    def _open_search(self):
+        self._search_bar.setVisible(True)
+        self._search_input.setFocus()
+        self._search_input.selectAll()
+
+    def _close_search(self):
+        self._search_bar.setVisible(False)
+        self._search_count_lbl.setText('')
+
+    def _on_search_changed(self, text: str):
+        if not text:
+            self._search_count_lbl.setText('')
+            return
+        t = text.lower()
+        old_count = self.old_panel.browser.toPlainText().lower().count(t)
+        new_count = self.new_panel.browser.toPlainText().lower().count(t)
+        total = old_count + new_count
+        if total == 0:
+            self._search_count_lbl.setText('No matches')
+            self._search_count_lbl.setStyleSheet('color:#f38ba8;font-size:11px;background:transparent;')
+        else:
+            self._search_count_lbl.setText(f'{total} match{"es" if total != 1 else ""}')
+            self._search_count_lbl.setStyleSheet('color:#a6e3a1;font-size:11px;background:transparent;')
+
+    def _search_next(self):
+        text = self._search_input.text()
+        if not text:
+            return
+        found_old = self.old_panel.browser.find(text)
+        found_new = self.new_panel.browser.find(text)
+        if not found_old and not found_new:
+            # Wrap: reset cursors and try again from top
+            self.old_panel.browser.moveCursor(self.old_panel.browser.textCursor().MoveOperation.Start)
+            self.new_panel.browser.moveCursor(self.new_panel.browser.textCursor().MoveOperation.Start)
+            self.old_panel.browser.find(text)
+            self.new_panel.browser.find(text)
+
+    def _search_prev(self):
+        text = self._search_input.text()
+        if not text:
+            return
+        flags = QTextDocument.FindFlag.FindBackward
+        found_old = self.old_panel.browser.find(text, flags)
+        found_new = self.new_panel.browser.find(text, flags)
+        if not found_old and not found_new:
+            # Wrap: reset cursors and try again from bottom
+            from PySide6.QtGui import QTextCursor
+            c_old = self.old_panel.browser.textCursor()
+            c_old.movePosition(QTextCursor.MoveOperation.End)
+            self.old_panel.browser.setTextCursor(c_old)
+            c_new = self.new_panel.browser.textCursor()
+            c_new.movePosition(QTextCursor.MoveOperation.End)
+            self.new_panel.browser.setTextCursor(c_new)
+            self.old_panel.browser.find(text, flags)
+            self.new_panel.browser.find(text, flags)
