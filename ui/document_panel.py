@@ -26,7 +26,6 @@ _CSS = """
   span[style*="background:#b3ffb3"] { background: #b3ffb3; border-radius: 3px; }
   span[style*="background:#ffffa0"] { background: #ffffa0; border-radius: 3px; }
   span[style*="background:#ffd6d6"] { background: #ffd6d6; border-radius: 3px; }
-  span[style*="background:#ddd0ff"] { background: #ddd0ff; border-radius: 3px; }
 </style>
 """
 

@@ -75,7 +75,6 @@ BG_DELETE   = '#ffb3b3'   # pink-red  — deleted text
 BG_INSERT   = '#b3ffb3'   # green     — added text
 BG_MOD_OLD  = '#ffd6d6'   # light pink — old side of a modification
 BG_MOD_NEW  = '#ffffa0'   # yellow    — new side of a modification
-BG_EMPHASIS = '#ddd0ff'   # purple    — emphasis-only change
 
 
 # ── Token: one word with its source formatting ───────────────────────────────
@@ -90,10 +89,6 @@ class _Token:
     @property
     def is_newline(self) -> bool:
         return self.word == '\n'
-
-    @property
-    def fmt_key(self) -> tuple:
-        return (self.bold, self.italic, self.src_strike, self.underline)
 
     def render(self, bg: str = '', diff_strike: bool = False) -> str:
         if self.is_newline:
@@ -171,8 +166,9 @@ def _render_highlighted(block: TextBlock, bg: str, diff_strike: bool = False) ->
 def _word_diff_html(old_block: TextBlock, new_block: TextBlock) -> Tuple[str, str, str]:
     """
     Word-level diff within a matched block pair.
-    Returns (old_html, new_html, change_type) where
-    change_type is 'equal' | 'modified' | 'emphasis'.
+    Returns (old_html, new_html, change_type) where change_type is 'equal' | 'modified'.
+    Only content changes (added/deleted/replaced words) are flagged — formatting
+    differences (bold, italic, underline, strikethrough) are intentionally ignored.
     """
     old_tok = _block_tokens(old_block)
     new_tok = _block_tokens(new_block)
@@ -187,19 +183,13 @@ def _word_diff_html(old_block: TextBlock, new_block: TextBlock) -> Tuple[str, st
     old_parts: List[str] = []
     new_parts: List[str] = []
     has_content_change = False
-    has_emphasis_change = False
 
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == 'equal':
-            for oi, ni in zip(range(i1, i2), range(j1, j2)):
-                ot, nt = old_tok[oi], new_tok[ni]
-                if ot.fmt_key != nt.fmt_key:
-                    has_emphasis_change = True
-                    old_parts.append(ot.render(bg=BG_EMPHASIS) + ' ')
-                    new_parts.append(nt.render(bg=BG_EMPHASIS) + ' ')
-                else:
-                    old_parts.append(ot.render() + ' ')
-                    new_parts.append(nt.render() + ' ')
+            for oi in range(i1, i2):
+                old_parts.append(old_tok[oi].render() + ' ')
+            for ni in range(j1, j2):
+                new_parts.append(new_tok[ni].render() + ' ')
 
         elif tag == 'delete':
             has_content_change = True
@@ -218,12 +208,7 @@ def _word_diff_html(old_block: TextBlock, new_block: TextBlock) -> Tuple[str, st
             for tok in new_tok[j1:j2]:
                 new_parts.append(tok.render(bg=BG_MOD_NEW) + ' ')
 
-    change_type = 'equal'
-    if has_content_change:
-        change_type = 'modified'
-    elif has_emphasis_change:
-        change_type = 'emphasis'
-
+    change_type = 'modified' if has_content_change else 'equal'
     return ''.join(old_parts).rstrip(), ''.join(new_parts).rstrip(), change_type
 
 
@@ -233,21 +218,15 @@ def _truncate(text: str, limit: int = 120) -> str:
 
 def _sidebar_item(kind: str, label: str, old_txt: str, new_txt: str, cid: str) -> str:
     badge_map = {
-        'del':  ('bdel',  'Deleted'),
-        'add':  ('badd',  'Added'),
-        'mod':  ('bmod',  'Modified'),
-        'emph': ('bemph', 'Emphasis'),
+        'del': ('bdel', 'Deleted'),
+        'add': ('badd', 'Added'),
+        'mod': ('bmod', 'Modified'),
     }
     bclass, blabel = badge_map.get(kind, ('bmod', label))
     oe = _html.escape(_truncate(old_txt))
     ne = _html.escape(_truncate(new_txt))
 
-    if kind == 'emph':
-        # Text is the same; only formatting differed — show the text once.
-        detail = (
-            f'<div style="margin-top:3px;font-size:11px;color:#a6adc8">{oe or ne}</div>'
-        )
-    elif old_txt and new_txt:
+    if old_txt and new_txt:
         detail = (
             f'<div style="margin-top:3px;font-size:11px">'
             f'<span style="text-decoration:line-through;color:#f38ba8">{oe}</span>'
@@ -266,8 +245,7 @@ def _sidebar_item(kind: str, label: str, old_txt: str, new_txt: str, cid: str) -
         )
 
     # Encode the change type in the URL fragment so the click handler can
-    # decide which panel(s) to navigate:  del → old only, add → new only,
-    # mod/emph → both.
+    # decide which panel(s) to navigate: del → old only, add → new only, mod → both.
     href = f'#{kind}:{cid}'
 
     return (
@@ -292,8 +270,10 @@ def build_diff_html(old_doc: Document, new_doc: Document) -> Tuple[str, str, str
     """
     Two-pass diff:
       Pass 1 — block-level SequenceMatcher aligns paragraphs.
-      Pass 2 — word-level diff within each 'replace' pair to find
-               content modifications and emphasis-only changes.
+      Pass 2 — word-level diff within each 'replace' pair to find content modifications.
+
+    Only content changes (Added / Deleted / Modified) are reported.
+    Formatting-only differences (bold, italic, underline, strikethrough) are ignored.
 
     Returns (old_panel_html, new_panel_html, sidebar_html).
     """
@@ -311,7 +291,7 @@ def build_diff_html(old_doc: Document, new_doc: Document) -> Tuple[str, str, str
     new_parts: List[str] = []
     sidebar_items: List[str] = []
     change_num = 0
-    stats = {'added': 0, 'deleted': 0, 'modified': 0, 'emphasis': 0}
+    stats = {'added': 0, 'deleted': 0, 'modified': 0}
 
     for tag, i1, i2, j1, j2 in block_matcher.get_opcodes():
 
@@ -319,24 +299,8 @@ def build_diff_html(old_doc: Document, new_doc: Document) -> Tuple[str, str, str
             for bi, bj in zip(range(i1, i2), range(j1, j2)):
                 ob = old_blocks[bi]
                 nb = new_blocks[bj]
-                wold, wnew, ctype = _word_diff_html(ob, nb)
-                if ctype == 'equal':
-                    old_parts.append(_p(_render_plain(ob)))
-                    new_parts.append(_p(_render_plain(nb)))
-                else:
-                    # Formatting differs despite identical text
-                    change_num += 1
-                    cid = f'c{change_num}'
-                    old_parts.append(_p(wold, cid))
-                    new_parts.append(_p(wnew, cid))
-                    old_txt = ob.plain_text().strip()
-                    new_txt = nb.plain_text().strip()
-                    if ctype == 'emphasis':
-                        stats['emphasis'] += 1
-                        sidebar_items.append(_sidebar_item('emph', 'Emphasis', old_txt, new_txt, cid))
-                    else:
-                        stats['modified'] += 1
-                        sidebar_items.append(_sidebar_item('mod', 'Modified', old_txt, new_txt, cid))
+                old_parts.append(_p(_render_plain(ob)))
+                new_parts.append(_p(_render_plain(nb)))
 
         elif tag == 'delete':
             for b in old_blocks[i1:i2]:
@@ -373,19 +337,15 @@ def build_diff_html(old_doc: Document, new_doc: Document) -> Tuple[str, str, str
 
                     wold, wnew, ctype = _word_diff_html(ob, nb)
                     if ctype == 'equal':
-                        old_parts.append(_p(wold or _render_plain(ob)))
-                        new_parts.append(_p(wnew or _render_plain(nb)))
+                        old_parts.append(_p(_render_plain(ob)))
+                        new_parts.append(_p(_render_plain(nb)))
                     else:
                         change_num += 1
                         cid = f'c{change_num}'
                         old_parts.append(_p(wold, cid))
                         new_parts.append(_p(wnew, cid))
-                        if ctype == 'emphasis':
-                            stats['emphasis'] += 1
-                            sidebar_items.append(_sidebar_item('emph', 'Emphasis', old_txt, new_txt, cid))
-                        else:
-                            stats['modified'] += 1
-                            sidebar_items.append(_sidebar_item('mod', 'Modified', old_txt, new_txt, cid))
+                        stats['modified'] += 1
+                        sidebar_items.append(_sidebar_item('mod', 'Modified', old_txt, new_txt, cid))
 
                 elif op == 'del':
                     txt = ob.plain_text().strip()
@@ -425,21 +385,18 @@ def _build_sidebar(items: List[str], stats: dict) -> str:
       .s-del  { background:#f38ba8; color:#1e1e2e; }
       .s-add  { background:#a6e3a1; color:#1e1e2e; }
       .s-mod  { background:#ffd699; color:#1e1e2e; }
-      .s-emph { background:#cba6f7; color:#1e1e2e; }
       .ch     { margin:4px 0; padding:6px 8px; border-radius:5px;
                 background:#313244; cursor:pointer; }
       .ch:hover { background:#3d3f5a; }
       .del    { border-left:3px solid #f38ba8; }
       .add    { border-left:3px solid #a6e3a1; }
       .mod    { border-left:3px solid #ffd699; }
-      .emph   { border-left:3px solid #cba6f7; }
       .badge  { display:inline-block; font-size:10px; font-weight:bold;
                 padding:1px 6px; border-radius:3px; margin-right:6px;
                 vertical-align:middle; }
       .bdel   { background:#f38ba8; color:#1e1e2e; }
       .badd   { background:#a6e3a1; color:#1e1e2e; }
       .bmod   { background:#ffd699; color:#1e1e2e; }
-      .bemph  { background:#cba6f7; color:#1e1e2e; }
       .empty  { color:#585b70; font-style:italic; text-align:center;
                 margin-top:40px; }
       a { text-decoration:none; color:inherit; }
@@ -458,7 +415,6 @@ def _build_sidebar(items: List[str], stats: dict) -> str:
         f'<span class="stat s-del">{stats["deleted"]} Deleted</span>'
         f'<span class="stat s-add">{stats["added"]} Added</span>'
         f'<span class="stat s-mod">{stats["modified"]} Modified</span>'
-        f'<span class="stat s-emph">{stats["emphasis"]} Emphasis</span>'
         f'</div>'
     )
     return css + '<body>' + header + stats_html + '\n'.join(items) + '</body>'
