@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QLabel, QTextBrowser, QProgressBar, QCheckBox, QFrame, QLineEdit,
     QPlainTextEdit,
 )
-from PySide6.QtCore import Qt, QThread, Signal, QUrl
+from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut, QTextDocument
 
 from ui.document_panel import DocumentPanel
@@ -445,8 +445,6 @@ class MainWindow(QMainWindow):
 
         # Edit-text mode
         self.btn_edit_text = _btn('✎ Edit Text', '#6c757d', '#5a6268')
-        self.btn_recompare = _btn('↺ Re-compare', '#2a9d8f', '#21867a')
-        self.btn_recompare.setVisible(False)
 
         self._sync_cb = QCheckBox('Sync Scroll')
         self._sync_cb.setStyleSheet(
@@ -472,7 +470,6 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.btn_view)
         tb.addWidget(_sep())
         tb.addWidget(self.btn_edit_text)
-        tb.addWidget(self.btn_recompare)
         tb.addWidget(_sep())
         tb.addWidget(self.btn_export)
         tb.addWidget(_sep())
@@ -704,8 +701,15 @@ class MainWindow(QMainWindow):
         self.btn_export.clicked.connect(self._export_html)
         self.btn_save.clicked.connect(self._save_xml)
         self.btn_edit_text.clicked.connect(self._toggle_edit_mode)
-        self.btn_recompare.clicked.connect(self._recompare_from_edited_text)
         QShortcut(QKeySequence('Ctrl+S'), self).activated.connect(self._save_xml)
+
+        # Auto-recompare: fires 800 ms after the user stops typing in either editor
+        self._recompare_timer = QTimer()
+        self._recompare_timer.setSingleShot(True)
+        self._recompare_timer.setInterval(800)
+        self._recompare_timer.timeout.connect(self._recompare_from_edited_text)
+        self._old_edit.textChanged.connect(self._schedule_recompare)
+        self._new_edit.textChanged.connect(self._schedule_recompare)
         QShortcut(QKeySequence('Ctrl+F'), self).activated.connect(self._open_search)
         QShortcut(QKeySequence('Escape'), self._search_bar).activated.connect(self._close_search)
 
@@ -1060,51 +1064,56 @@ class MainWindow(QMainWindow):
         self._edit_mode = not self._edit_mode
 
         if self._edit_mode:
-            # Populate editors with plain extracted text
+            # Block signals while populating so setPlainText doesn't trigger auto-recompare
+            self._old_edit.blockSignals(True)
+            self._new_edit.blockSignals(True)
             self._old_edit.setPlainText(self._old_doc.plain_text())
             self._new_edit.setPlainText(self._new_doc.plain_text())
-            # Switch stacks to edit view
+            self._old_edit.blockSignals(False)
+            self._new_edit.blockSignals(False)
             self._old_stack.setCurrentIndex(1)
             self._new_stack.setCurrentIndex(1)
             self.btn_edit_text.setText('✎ Cancel Edit')
-            self.btn_recompare.setVisible(True)
             self._status.showMessage(
-                'Edit mode — modify extracted text, then click ↺ Re-compare.'
+                'Edit mode — type in either panel; comparison updates automatically.'
             )
         else:
-            # Restore compare view without re-running diff
+            self._recompare_timer.stop()
             self._old_stack.setCurrentIndex(0)
             self._new_stack.setCurrentIndex(0)
             self.btn_edit_text.setText('✎ Edit Text')
-            self.btn_recompare.setVisible(False)
             self._status.showMessage('Edit cancelled — comparison view restored.')
 
+    def _schedule_recompare(self):
+        if self._edit_mode:
+            self._recompare_timer.start()
+            self._status.showMessage('Editing… comparison will update automatically.')
+
     def _recompare_from_edited_text(self):
+        if not self._edit_mode:
+            return
         old_text = self._old_edit.toPlainText()
         new_text = self._new_edit.toPlainText()
 
         self._old_doc = _text_to_doc(old_text)
         self._new_doc = _text_to_doc(new_text)
 
-        self._status.showMessage('Re-comparing edited text…')
+        self._status.showMessage('Auto-comparing…')
         try:
             self._old_diff_html, self._new_diff_html, sidebar_html = build_diff_html(
                 self._old_doc, self._new_doc
             )
         except Exception as e:
-            self._status.showMessage(f'Re-compare error: {e}')
+            self._status.showMessage(f'Auto-compare error: {e}')
             return
 
+        # Update the compare view in the background (panels are on stack index 0,
+        # hidden behind the editors while still in edit mode)
         self.old_panel.set_html(self._old_diff_html)
         self.new_panel.set_html(self._new_diff_html)
         self.sidebar.setHtml(sidebar_html)
-
-        # Exit edit mode and return to compare view
-        self._edit_mode = False
-        self._old_stack.setCurrentIndex(0)
-        self._new_stack.setCurrentIndex(0)
-        self.btn_edit_text.setText('✎ Edit Text')
-        self.btn_recompare.setVisible(False)
         self._view_raw = False
         self.btn_view.setText('PDF Page View')
-        self._status.showMessage('Re-compare complete from edited text.')
+        self._status.showMessage(
+            'Comparison updated. Keep editing or click ✎ Cancel Edit to exit.'
+        )
