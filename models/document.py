@@ -64,8 +64,10 @@ class TextBlock:
 
     def plain_text(self) -> str:
         """Return a space‑collapsed version of the block’s text (diff input)."""
-        # Normalise internal whitespace – PDF extractors often insert extra spaces.
-        return ' '.join(s.text for s in self.spans if s.text).strip()
+        # Normalise internal whitespace – PDF extractors and the line‑merge step
+        # often insert extra spaces; collapse any run to a single space.
+        joined = ' '.join(s.text for s in self.spans if s.text)
+        return _re.sub(r'\s+', ' ', joined).strip()
 
     def display_text(self) -> str:
         """Indented, layout‑preserving text for the editable panels."""

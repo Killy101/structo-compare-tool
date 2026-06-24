@@ -158,6 +158,18 @@ def extract_pdf(path: str) -> Document:
             if raw_block.get("type") != 0:          # ignore images, etc.
                 continue
 
+            # Soft-wrapped lines inside one PyMuPDF block belong to the *same*
+            # paragraph; we merge them into a single TextBlock so that diffing
+            # happens at the paragraph level.  (Splitting per visual line makes
+            # the diff explode with false positives whenever the two documents
+            # wrap the same paragraph at different points.)
+            block_spans: List[TextSpan] = []
+            first_line_spans: List[TextSpan] = []
+            first_x0 = None
+            first_size = body_size
+            block_top = None
+            block_bottom = None
+
             for line in raw_block["lines"]:
                 line_spans: List[TextSpan] = []
                 line_size = body_size
@@ -248,28 +260,45 @@ def extract_pdf(path: str) -> Document:
                 ltop = lbbox[1] if lbbox else (prev_bottom or 0.0)
                 lbottom = lbbox[3] if lbbox else ltop
 
-                # Insert a blank block when there is a clear vertical gap -
-                # this preserves paragraph / section spacing.
-                if prev_bottom is not None and (ltop - prev_bottom) > line_size * 0.7:
-                    if doc.blocks and not doc.blocks[-1].is_blank():
-                        doc.blocks.append(TextBlock(kind='blank'))
+                if first_x0 is None:                 # first line of the paragraph
+                    first_x0 = lx0
+                    first_size = line_size
+                    first_line_spans = line_spans
+                    block_top = ltop
+                else:                                # join with a single space
+                    block_spans.append(TextSpan(text=" "))
+                block_spans.extend(line_spans)
+                block_bottom = lbottom
 
-                indent = max(0, round((lx0 - page_left) / unit))
+            # Skip empty paragraphs.
+            if not any(s.text.strip() for s in block_spans):
+                continue
 
-                # ---- structural role ---------------------------------
-                line_text = ' '.join(s.text for s in line_spans).strip()
-                kind = 'normal'
-                if _LIST_RE.match(line_text):
-                    kind = 'list'
-                elif (line_size >= body_size * 1.15
-                      and all(s.bold for s in line_spans)
-                      and len(line_text) < 120):
-                    kind = 'heading'
+            # Insert a blank block when there is a clear vertical gap before this
+            # paragraph - this preserves paragraph / section spacing.
+            if (prev_bottom is not None and block_top is not None
+                    and (block_top - prev_bottom) > first_size * 0.9):
+                if doc.blocks and not doc.blocks[-1].is_blank():
+                    doc.blocks.append(TextBlock(kind='blank'))
 
-                doc.blocks.append(
-                    TextBlock(spans=line_spans, indent=indent, kind=kind)
-                )
-                prev_bottom = lbottom
+            indent = max(0, round((first_x0 - page_left) / unit)) if first_x0 else 0
+
+            # ---- structural role (judged from the first line) ----------
+            block_text = ' '.join(s.text for s in block_spans).strip()
+            first_text = ' '.join(s.text for s in first_line_spans).strip()
+            kind = 'normal'
+            if _LIST_RE.match(first_text):
+                kind = 'list'
+            elif (first_size >= body_size * 1.15
+                  and all(s.bold for s in first_line_spans)
+                  and len(block_text) < 120):
+                kind = 'heading'
+
+            doc.blocks.append(
+                TextBlock(spans=block_spans, indent=indent, kind=kind)
+            )
+            if block_bottom is not None:
+                prev_bottom = block_bottom
 
     # Trim a trailing blank block, if any.
     while doc.blocks and doc.blocks[-1].is_blank():
