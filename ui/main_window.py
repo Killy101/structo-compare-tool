@@ -11,7 +11,7 @@ from PySide6.QtGui import QKeySequence, QShortcut
 
 from ui.document_panel import DocumentPanel
 from ui.xml_editor import XmlEditor
-from logic.pdf_extractor import extract_pdf
+from logic.pdf_extractor import extract_pdf, render_pdf_preview
 from logic.xml_extractor import extract_xml
 from logic.differ import build_diff_html
 from models.document import Document
@@ -356,10 +356,12 @@ class MainWindow(QMainWindow):
         self.setWindowTitle('Structo Compare — PDF vs PDF + XML Editor')
         self.resize(1600, 920)
 
-        self._old_doc:      Document | None = None
-        self._new_doc:      Document | None = None
+        self._old_doc:       Document | None = None
+        self._new_doc:       Document | None = None
         self._old_diff_html: str = ''
         self._new_diff_html: str = ''
+        self._old_path:      str = ''
+        self._new_path:      str = ''
         self._worker:        _CompareWorker | None = None
         self._view_raw:      bool = False
         self._scroll_syncing: bool = False
@@ -406,8 +408,9 @@ class MainWindow(QMainWindow):
             'color:#edf2f4;font-size:17px;font-weight:bold;letter-spacing:1px;'
         )
 
-        self.btn_back    = _btn('← New Files',   '#3a3a6a', '#4a4a8a')
-        self.btn_view    = _btn('PDF Raw View',   '#6c757d', '#5a6268')
+        self.btn_back    = _btn('← New Files',    '#3a3a6a', '#4a4a8a')
+        self.btn_view    = _btn('PDF Page View',  '#6c757d', '#5a6268')
+        self.btn_export  = _btn('Export HTML',    '#2a7de1', '#1a6dd0')
         self.btn_save    = _btn('Save XML As…',   '#e76f51', '#d4623d')
 
         self._sync_cb = QCheckBox('Sync Scroll')
@@ -429,6 +432,8 @@ class MainWindow(QMainWindow):
         tb.addWidget(_sep())
         tb.addWidget(self._sync_cb)
         tb.addWidget(self.btn_view)
+        tb.addWidget(_sep())
+        tb.addWidget(self.btn_export)
         tb.addWidget(_sep())
         tb.addWidget(self._save_status)
         tb.addWidget(self.btn_save)
@@ -531,6 +536,7 @@ class MainWindow(QMainWindow):
         # Workspace toolbar
         self.btn_back.clicked.connect(self._go_to_upload)
         self.btn_view.clicked.connect(self._toggle_view)
+        self.btn_export.clicked.connect(self._export_html)
         self.btn_save.clicked.connect(self._save_xml)
         QShortcut(QKeySequence('Ctrl+S'), self).activated.connect(self._save_xml)
 
@@ -563,6 +569,10 @@ class MainWindow(QMainWindow):
                 self._set_saved_state('XML loaded — not yet saved')
             except Exception as e:
                 self._status.showMessage(f'XML load error: {e}')
+
+        # Remember paths for PDF Page View
+        self._old_path = up.old_path
+        self._new_path = up.new_path
 
         # Switch to processing screen
         self._stack.setCurrentIndex(1)
@@ -606,15 +616,97 @@ class MainWindow(QMainWindow):
             return
         self._view_raw = not self._view_raw
         if self._view_raw:
-            self.old_panel.set_html(self._old_doc.to_html())
-            self.new_panel.set_html(self._new_doc.to_html())
-            self.btn_view.setText('Compare View')
-            self._status.showMessage('PDF Raw View — showing extracted text without diff highlights.')
+            # Render actual PDF pages as images so users see true layout.
+            self._status.showMessage('Rendering PDF pages…')
+            try:
+                self.old_panel.set_html(render_pdf_preview(self._old_path))
+                self.new_panel.set_html(render_pdf_preview(self._new_path))
+                self.btn_view.setText('Compare View')
+                self._status.showMessage(
+                    'PDF Page View — true page layout.  Click Compare View to return.')
+            except Exception as e:
+                self._view_raw = False
+                self._status.showMessage(f'PDF Page View error: {e}')
         else:
             self.old_panel.set_html(self._old_diff_html)
             self.new_panel.set_html(self._new_diff_html)
-            self.btn_view.setText('PDF Raw View')
+            self.btn_view.setText('PDF Page View')
             self._status.showMessage('Compare View — diff highlights restored.')
+
+    # ── Export HTML ───────────────────────────────────────────────────────────
+    def _export_html(self):
+        if not self._old_diff_html:
+            self._status.showMessage('Run a comparison first before exporting.')
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Export Comparison as HTML', '',
+            'HTML Files (*.html);;All Files (*)'
+        )
+        if not path:
+            return
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(self._build_export_html())
+            self._status.showMessage(f'Exported: {path}')
+        except Exception as e:
+            self._status.showMessage(f'Export error: {e}')
+
+    def _build_export_html(self) -> str:
+        old_name = os.path.basename(self._old_path) if self._old_path else 'Old PDF'
+        new_name = os.path.basename(self._new_path) if self._new_path else 'New PDF'
+        css = """
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: Arial, sans-serif; font-size: 13px;
+         color: #1a1a1a; background: #f0f0f0; }
+  h1 { font-size: 18px; padding: 14px 20px;
+       background: #1a1a2e; color: #edf2f4; letter-spacing: 1px; }
+  .legend { background: #f8f9fa; padding: 8px 20px; border-bottom: 1px solid #dee2e6;
+            display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .chip { padding: 2px 10px; border-radius: 3px; font-size: 11px;
+          border: 1px solid rgba(0,0,0,.12); }
+  .panels { display: flex; gap: 0; height: calc(100vh - 90px); }
+  .panel { flex: 1; overflow-y: auto; background: #fff;
+           border-right: 1px solid #ddd; padding: 14px; }
+  .panel h2 { font-size: 12px; text-align: center; background: #2b2d42;
+              color: #edf2f4; padding: 6px; margin: -14px -14px 10px;
+              font-weight: bold; letter-spacing: .5px; }
+  p { margin: 3px 0; line-height: 1.6; }
+  span[style*="background:#ffb3b3"] { background:#ffb3b3; border-radius:3px; }
+  span[style*="background:#b3ffb3"] { background:#b3ffb3; border-radius:3px; }
+  span[style*="background:#ffffa0"] { background:#ffffa0; border-radius:3px; }
+  span[style*="background:#ffd6d6"] { background:#ffd6d6; border-radius:3px; }
+  span[style*="background:#ddd0ff"] { background:#ddd0ff; border-radius:3px; }
+</style>"""
+        return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Structo Compare — {old_name} vs {new_name}</title>
+{css}
+</head>
+<body>
+<h1>Structo Compare</h1>
+<div class="legend">
+  <b>Legend:</b>
+  <span class="chip" style="background:#ffb3b3">Deleted</span>
+  <span class="chip" style="background:#b3ffb3">Added</span>
+  <span class="chip" style="background:#ffffa0">Modified (new)</span>
+  <span class="chip" style="background:#ffd6d6">Modified (old)</span>
+  <span class="chip" style="background:#ddd0ff">Emphasis change</span>
+</div>
+<div class="panels">
+  <div class="panel">
+    <h2>Old — {old_name}</h2>
+    {self._old_diff_html}
+  </div>
+  <div class="panel">
+    <h2>New — {new_name}</h2>
+    {self._new_diff_html}
+  </div>
+</div>
+</body>
+</html>"""
 
     # ── Sync scroll ───────────────────────────────────────────────────────────
     def _on_sync_toggled(self, checked: bool):
