@@ -3,6 +3,8 @@ from PySide6.QtWidgets import QWidget, QVBoxLayout, QTextEdit
 from PySide6.QtGui import QTextCursor, QColor
 from PySide6.QtCore import Qt, QTimer
 
+from models.document import Document, TextBlock, TextSpan
+
 _CSS = """
 <style>
   body {
@@ -87,6 +89,57 @@ class DocumentPanel(QWidget):
         U+00A0; converting it lets the re‑extractor recover indent levels.
         """
         return self.browser.toPlainText().replace('\xa0', ' ')
+
+    # -------------------------------------------------------------------
+    def edited_document(self) -> Document:
+        """Read the panel's current content back into a :class:`Document`,
+        preserving per‑word emphasis (bold / italic / underline /
+        strikethrough) and indentation so a Re‑Compare keeps formatting.
+
+        Diff‑highlight backgrounds and the zero‑width navigation anchors are
+        ignored — only genuine source emphasis is recovered.
+        """
+        doc = Document()
+        qdoc = self.browser.document()
+        block = qdoc.begin()
+        while block.isValid():
+            # Strip zero‑width anchors and normalise nbsp padding to spaces.
+            raw = block.text().replace('​', '').replace('\xa0', ' ')
+            if not raw.strip():
+                doc.blocks.append(TextBlock(kind='blank'))
+                block = block.next()
+                continue
+
+            indent = len(raw) - len(raw.lstrip(' '))
+            spans: list[TextSpan] = []
+            it = block.begin()
+            while not it.atEnd():
+                frag = it.fragment()
+                if frag.isValid():
+                    ftext = frag.text().replace('​', '').replace('\xa0', ' ')
+                    if ftext:
+                        font = frag.charFormat().font()
+                        spans.append(TextSpan(
+                            text=ftext,
+                            bold=font.bold(),
+                            italic=font.italic(),
+                            underline=font.underline(),
+                            strikethrough=font.strikeOut(),
+                        ))
+                it += 1
+
+            # Drop the leading indentation from the first span's text.
+            if spans and indent:
+                spans[0].text = spans[0].text.lstrip(' ')
+            if spans:
+                doc.blocks.append(TextBlock(spans=spans, indent=indent))
+            else:
+                doc.blocks.append(TextBlock(kind='blank'))
+            block = block.next()
+
+        while doc.blocks and doc.blocks[-1].is_blank():
+            doc.blocks.pop()
+        return doc
 
     # -------------------------------------------------------------------
     def scroll_to_anchor(self, anchor: str):

@@ -14,7 +14,6 @@ from ui.xml_editor import XmlEditor
 from logic.pdf_extractor import extract_pdf, render_pdf_preview
 from logic.xml_extractor import extract_xml
 from logic.differ import build_diff_html
-from logic.text_parser import text_to_doc as _text_to_doc
 from models.document import Document
 
 
@@ -1031,10 +1030,10 @@ class MainWindow(QMainWindow):
         if self._view_raw:
             self._toggle_view()     # back to compare view before reading text
 
-        old_text = self.old_panel.edited_text()
-        new_text = self.new_panel.edited_text()
-        self._old_doc = _text_to_doc(old_text)
-        self._new_doc = _text_to_doc(new_text)
+        # Read the edited panels back into documents, preserving per‑word
+        # emphasis (bold / italic / underline / strikethrough) and indentation.
+        self._old_doc = self.old_panel.edited_document()
+        self._new_doc = self.new_panel.edited_document()
 
         self._status.showMessage('Re-comparing…')
         try:
