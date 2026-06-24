@@ -12,7 +12,8 @@ if not path:
     sys.exit(1)
 
 pdf = fitz.open(path)
-for page_num, page in enumerate(pdf):
+for page_num in range(pdf.page_count):
+    page = pdf[page_num]
     drawings = page.get_drawings()
     if not drawings:
         continue

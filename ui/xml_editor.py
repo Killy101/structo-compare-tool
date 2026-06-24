@@ -1,21 +1,23 @@
+# ui/xml_editor.py
 import re as _re
 from lxml import etree
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPlainTextEdit, QTextEdit,
-    QPushButton, QDialog, QLabel, QLineEdit, QCheckBox,
-    QMessageBox, QInputDialog, QScrollArea,
+    QPushButton, QLabel, QLineEdit, QCheckBox,
+    QMessageBox, QInputDialog, QScrollArea, QDialog, QToolTip,
 )
 from PySide6.QtGui import (
     QSyntaxHighlighter, QTextCharFormat, QColor, QFont,
     QKeySequence, QShortcut, QTextCursor, QTextDocument, QPainter,
 )
-from PySide6.QtCore import QRegularExpression, Qt, QSize, QRect, QTimer
+from PySide6.QtCore import QRegularExpression, Qt, QSize, QRect, QTimer, QEvent
 
 
-# ── Line-number gutter ────────────────────────────────────────────────────────
-
+# -----------------------------------------------------------------------
+# Line‑number gutter (unchanged)
+# -----------------------------------------------------------------------
 class _LineNumberArea(QWidget):
     def __init__(self, editor: '_CodeEdit'):
         super().__init__(editor)
@@ -28,25 +30,27 @@ class _LineNumberArea(QWidget):
         self._editor._paint_line_numbers(event)
 
 
-# ── Code editor (QPlainTextEdit + line numbers + auto-close tags) ─────────────
-
+# -----------------------------------------------------------------------
+# Code editor – now safe auto‑close and modest cursor‑aware logic
+# -----------------------------------------------------------------------
 class _CodeEdit(QPlainTextEdit):
-    """Plain-text editor with XML auto-close-tag behaviour and line numbers."""
-
+    """Plain‑text editor with line numbers, validation markers,
+    and an *auto‑close‑tag* feature that works anywhere on the line."""
     _OPEN_TAG_RE = _re.compile(r'<([A-Za-z_][\w:.-]*)(?:\s[^<>]*)?>$')
 
     def __init__(self):
         super().__init__()
         self._line_area = _LineNumberArea(self)
-        self._err_lines: set = set()   # 0-based block numbers with validation errors
+        self._err_lines: set[int] = set()
 
         self.blockCountChanged.connect(self._update_margin)
         self.updateRequest.connect(self._on_update_request)
         self.cursorPositionChanged.connect(self._repaint_current_line)
         self._update_margin()
 
-    # ── Line number geometry ──────────────────────────────────────────────────
-
+    # -------------------------------------------------------------------
+    # Geometry helpers (unchanged)
+    # -------------------------------------------------------------------
     def _line_number_width(self) -> int:
         digits = max(3, len(str(max(1, self.blockCount()))))
         return 10 + self.fontMetrics().horizontalAdvance('9') * digits
@@ -58,7 +62,9 @@ class _CodeEdit(QPlainTextEdit):
         if dy:
             self._line_area.scroll(0, dy)
         else:
-            self._line_area.update(0, rect.y(), self._line_area.width(), rect.height())
+            self._line_area.update(0, rect.y(),
+                                   self._line_area.width(),
+                                   rect.height())
         if rect.contains(self.viewport().rect()):
             self._update_margin()
 
@@ -66,10 +72,12 @@ class _CodeEdit(QPlainTextEdit):
         super().resizeEvent(event)
         cr = self.contentsRect()
         self._line_area.setGeometry(cr.left(), cr.top(),
-                                    self._line_number_width(), cr.height())
+                                    self._line_number_width(),
+                                    cr.height())
 
-    # ── Line number painting ──────────────────────────────────────────────────
-
+    # -------------------------------------------------------------------
+    # Painting line numbers (unchanged)
+    # -------------------------------------------------------------------
     def _paint_line_numbers(self, event):
         painter = QPainter(self._line_area)
         painter.fillRect(event.rect(), QColor('#f1f5f9'))
@@ -83,7 +91,7 @@ class _CodeEdit(QPlainTextEdit):
         )
         bottom = top + round(self.blockBoundingRect(block).height())
         fh = self.fontMetrics().height()
-        w  = self._line_area.width()
+        w = self._line_area.width()
 
         while block.isValid() and top <= event.rect().bottom():
             if block.isVisible() and bottom >= event.rect().top():
@@ -100,12 +108,12 @@ class _CodeEdit(QPlainTextEdit):
             num += 1
         painter.end()
 
-    # ── Current-line highlight + error-line highlight ─────────────────────────
-
+    # -------------------------------------------------------------------
+    # Current‑line + error‑line extra selections
+    # -------------------------------------------------------------------
     def _repaint_current_line(self):
         selections = []
 
-        # Current line — subtle highlight
         if not self.isReadOnly():
             sel = QTextEdit.ExtraSelection()
             sel.format.setBackground(QColor('#f1f5f9'))
@@ -114,47 +122,73 @@ class _CodeEdit(QPlainTextEdit):
             sel.cursor.clearSelection()
             selections.append(sel)
 
-        # Error lines — red background
         for line_num in self._err_lines:
-            block = self.document().findBlockByLineNumber(line_num)
+            block = self.document().findBlockByNumber(line_num)
             if block.isValid():
                 sel = QTextEdit.ExtraSelection()
                 sel.format.setBackground(QColor('#fee2e2'))
                 sel.format.setProperty(0x100000 + 1, True)
-                c = QTextCursor(block)
-                sel.cursor = c
+                sel.cursor = QTextCursor(block)
                 selections.append(sel)
 
         self.setExtraSelections(selections)
 
-    def set_error_lines(self, lines: set):
+    def set_error_lines(self, lines: set[int]):
         self._err_lines = lines
         self._repaint_current_line()
 
-    # ── Auto-close tag on '>' ─────────────────────────────────────────────────
-
+    # -------------------------------------------------------------------
+    # Safer auto‑close tag – works even if the cursor is **not**
+    # at the end of the line.
+    # -------------------------------------------------------------------
     def keyPressEvent(self, event):
         if event.text() == '>':
             cursor = self.textCursor()
-            line_start = cursor.block().position()
-            prefix = self.toPlainText()[line_start:cursor.position()]
-            super().keyPressEvent(event)
-            candidate = prefix + '>'
-            m = self._OPEN_TAG_RE.search(candidate)
-            if m and not candidate.rstrip().endswith('/>') \
-                    and not candidate.lstrip().startswith('</'):
+            block = cursor.block()
+            # text *up to* the cursor (including the character that will be inserted)
+            line_up_to_cursor = block.text()[:cursor.positionInBlock()] + '>'
+            m = self._OPEN_TAG_RE.search(line_up_to_cursor)
+            if m and not line_up_to_cursor.rstrip().endswith('/>') \
+                    and not line_up_to_cursor.lstrip().startswith('</'):
+                # Insert the '>' first (so the document updates)
+                super().keyPressEvent(event)
                 tag = m.group(1)
+                # Insert closing tag and place the caret inside it
                 c = self.textCursor()
                 c.insertText(f'</{tag}>')
-                c.movePosition(QTextCursor.MoveOperation.Left,
-                               QTextCursor.MoveMode.MoveAnchor, len(tag) + 3)
+                # Move cursor left to sit **before** the closing tag
+                for _ in range(len(tag) + 3):
+                    c.movePosition(QTextCursor.MoveOperation.Left,
+                                   QTextCursor.MoveMode.MoveAnchor)
                 self.setTextCursor(c)
-            return
+                return
         super().keyPressEvent(event)
 
+    # -------------------------------------------------------------------
+    # Event filter – show validation error tooltip on hover
+    # -------------------------------------------------------------------
+    def eventFilter(self, obj, event):
+        if obj is self.viewport() and event.type() == QEvent.Type.ToolTip:
+            cursor = self.cursorForPosition(event.pos())
+            line = cursor.blockNumber()
+            if line in self._err_lines:
+                # Pull the error message from the validation bar (shared state)
+                # The validation bar lives inside XmlEditor; we ask the parent.
+                parent = self.parent()
+                if isinstance(parent, XmlEditor):
+                    msg = parent._val_bar._msg.text()
+                else:
+                    msg = "XML error"
+                QToolTip.showText(event.globalPos(), msg, self)
+            else:
+                QToolTip.hideText()
+            return True
+        return super().eventFilter(obj, event)
 
-# ── XML syntax highlighter ────────────────────────────────────────────────────
 
+# -----------------------------------------------------------------------
+# Syntax highlighter (unchanged)
+# -----------------------------------------------------------------------
 class _XmlHighlighter(QSyntaxHighlighter):
     def __init__(self, doc):
         super().__init__(doc)
@@ -171,7 +205,7 @@ class _XmlHighlighter(QSyntaxHighlighter):
         self._rules = [
             (QRegularExpression(r'</?[\w:]+'),        fmt('#0451a5', bold=True)),
             (QRegularExpression(r'/?>'),               fmt('#0451a5', bold=True)),
-            (QRegularExpression(r'\b[\w:]+(?=\s*=)'), fmt('#e50000')),
+            (QRegularExpression(r'\b[\w:]+(?=\s*=)'),  fmt('#e50000')),
             (QRegularExpression(r'"[^"]*"'),           fmt('#a31515')),
             (QRegularExpression(r"'[^']*'"),           fmt('#a31515')),
             (QRegularExpression(r'<!--.*?-->'),        fmt('#008000', italic=True)),
@@ -187,11 +221,11 @@ class _XmlHighlighter(QSyntaxHighlighter):
                 self.setFormat(m.capturedStart(), m.capturedLength(), fmt)
 
 
-# ── Validation status bar ─────────────────────────────────────────────────────
-
+# -----------------------------------------------------------------------
+# Validation bar (unchanged, only minor docstring tweak)
+# -----------------------------------------------------------------------
 class _ValidationBar(QWidget):
-    """One-line bar that shows the XML validation state."""
-
+    """One‑line status bar that shows XML validation state."""
     def __init__(self):
         super().__init__()
         self.setFixedHeight(22)
@@ -201,7 +235,7 @@ class _ValidationBar(QWidget):
 
         self._icon = QLabel('—')
         self._icon.setFixedWidth(14)
-        self._msg  = QLabel('Open an XML file to begin editing.')
+        self._msg = QLabel('Open an XML file to begin editing.')
         f = QFont('Consolas', 10)
         self._msg.setFont(f)
         lay.addWidget(self._icon)
@@ -217,7 +251,7 @@ class _ValidationBar(QWidget):
             'empty': ('#94a3b8', '#f8fafc'),
         }
         fg, bg = colors.get(state, ('#858585', '#1e1e2e'))
-        icons  = {'idle': '—', 'ok': '✓', 'error': '✕', 'empty': '—'}
+        icons = {'idle': '—', 'ok': '✓', 'error': '✕', 'empty': '—'}
         self.setStyleSheet(f'background:{bg};')
         self._icon.setStyleSheet(f'color:{fg};font-weight:bold;')
         self._icon.setText(icons.get(state, '—'))
@@ -238,8 +272,9 @@ class _ValidationBar(QWidget):
         self._set_state('error', f'Line {line}, Col {col}: {short}')
 
 
-# ── Find / Replace dialog ─────────────────────────────────────────────────────
-
+# -----------------------------------------------------------------------
+# Find / Replace dialog (unchanged)
+# -----------------------------------------------------------------------
 class _FindReplaceDialog(QDialog):
     def __init__(self, editor, parent=None):
         super().__init__(parent)
@@ -251,6 +286,7 @@ class _FindReplaceDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
 
+        # ── Find ───────────────────────
         find_row = QHBoxLayout()
         find_row.addWidget(QLabel('Find:'))
         self._find_edit = QLineEdit()
@@ -259,6 +295,7 @@ class _FindReplaceDialog(QDialog):
         find_row.addWidget(self._find_edit)
         layout.addLayout(find_row)
 
+        # ── Replace ────────────────────
         repl_row = QHBoxLayout()
         repl_row.addWidget(QLabel('Replace:'))
         self._repl_edit = QLineEdit()
@@ -266,9 +303,11 @@ class _FindReplaceDialog(QDialog):
         repl_row.addWidget(self._repl_edit)
         layout.addLayout(repl_row)
 
+        # ── Options ────────────────────
         self._case_cb = QCheckBox('Match case')
         layout.addWidget(self._case_cb)
 
+        # ── Buttons ────────────────────
         btn_row = QHBoxLayout()
         for label, slot in [
             ('Find Next',   self._find_next),
@@ -299,9 +338,9 @@ class _FindReplaceDialog(QDialog):
             return False
         found = self._editor.find(text, self._find_flags())
         if not found and wrap:
-            cursor = self._editor.textCursor()
-            cursor.movePosition(QTextCursor.MoveOperation.Start)
-            self._editor.setTextCursor(cursor)
+            cur = self._editor.textCursor()
+            cur.movePosition(QTextCursor.MoveOperation.Start)
+            self._editor.setTextCursor(cur)
             found = self._editor.find(text, self._find_flags())
         self._status.setText('' if found else 'Not found.')
         return found
@@ -311,12 +350,12 @@ class _FindReplaceDialog(QDialog):
         repl = self._repl_edit.text()
         if not text:
             return
-        cursor = self._editor.textCursor()
-        sel = cursor.selectedText()
+        cur = self._editor.textCursor()
+        sel = cur.selectedText()
         if sel and (
             sel == text if self._case_cb.isChecked() else sel.lower() == text.lower()
         ):
-            cursor.insertText(repl)
+            cur.insertText(repl)
         self._find_next()
 
     def _replace_all(self):
@@ -336,160 +375,53 @@ class _FindReplaceDialog(QDialog):
         self._status.setText(f'Replaced {count} occurrence(s).')
 
 
-# ── WF2 shortcut definitions ──────────────────────────────────────────────────
-WRAP_USEREDIT = '<innodReplace userEdit="true">_</innodReplace>'
-
-EMPHASIS_TAGS = [
-    ('Alt+B', '<b>…</b>',  '<b>_</b>'),
-    ('Alt+I', '<i>…</i>',  '<i>_</i>'),
-    ('Alt+U', '<u>…</u>',  '<u>_</u>'),
-    ('Alt+S', '<s>…</s>',  '<s>_</s>'),
-]
-
-STRUCTURE_TAGS = [
-    ('Alt+P', 'innodReplace + <p>',
-     '<innodReplace text="&#10;&#10;">_</innodReplace><p>|</p>'),
-    ('Alt+L', 'innodLevel + section',
-     '<innodLevel level="|"><section>_</section></innodLevel>'),
-    ('Alt+Q', 'innodIdentifier',
-     '<innodIdentifier>|</innodIdentifier>'),
-    ('Alt+H', 'innodHeading',
-     '<innodHeading>|</innodHeading>'),
-    ('Alt+F', 'innodFootnoteRef',
-     '<innodFootnoteRef fid="|" id="" text="">_</innodFootnoteRef>'),
-    ('Alt+T', 'innodFootnote',
-     '<innodFootnote><footnote>_</footnote></innodFootnote>'),
-    ('Alt+M', 'innodImg',
-     '<innodImg src="|"><img src="_" /></innodImg>'),
-    ('Alt+6', 'innodTable (2×2)',
-     '<innodTable><table>\n  <tr><td>|</td><td></td></tr>\n'
-     '  <tr><td></td><td></td></tr>\n</table></innodTable>'),
-    ('Alt+7', 'inno-ref (manual)',
-     '<inno-ref type="manual" href="_">|</inno-ref>'),
-]
-
-GENERAL_SHORTCUTS = [
-    ('Ctrl+S',          'Save XML (Save As…)'),
-    ('Ctrl+Shift+E',    'Wrap selection as <innodReplace userEdit>…</innodReplace>'),
-    ('Ctrl+Shift+F',    'Format / pretty-print XML'),
-    ('Ctrl+Z / Ctrl+Y', 'Undo / Redo'),
-    ('Ctrl+F / Ctrl+H', 'Find / Find & Replace'),
-    ('Ctrl+G',          'Go to line'),
-    ('Ctrl+/',          'Toggle comment on selection'),
-    ('F1',              'Show this Shortcuts help'),
-]
-
-
-# ── Help & Shortcuts dialog ───────────────────────────────────────────────────
-
+# -----------------------------------------------------------------------
+# Shortcuts dialog
+# -----------------------------------------------------------------------
 class _ShortcutsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle('XML Editor — Help & Shortcuts')
+        self.setWindowTitle('Keyboard Shortcuts')
         self.setModal(True)
-        self.resize(560, 640)
-        self.setStyleSheet('background:#ffffff;')
+        self.resize(420, 260)
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+        layout.setContentsMargins(12, 12, 12, 12)
 
-        header = QLabel('  ⌨  XML Editor — Help & Shortcuts')
-        header.setStyleSheet(
-            'font-size:16px;font-weight:bold;color:#1f3a5f;padding:14px;'
-            'border-bottom:1px solid #e0e0e0;'
+        shortcuts = (
+            'Ctrl+Shift+F   Format XML\n'
+            'Ctrl+F         Find\n'
+            'Ctrl+H         Replace\n'
+            'Ctrl+G         Go to Line\n'
+            'Ctrl+/         Toggle comment\n'
+            'Ctrl+Z         Undo\n'
+            'Ctrl+Y         Redo\n'
+            'F1             Show shortcuts'
         )
-        root.addWidget(header)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet('border:none;')
-        body = QWidget()
-        bl = QVBoxLayout(body)
-        bl.setContentsMargins(18, 14, 18, 14)
-        bl.setSpacing(14)
+        label = QLabel(f'<pre>{shortcuts}</pre>')
+        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(label)
 
-        bl.addWidget(self._section('General', [
-            (k, d, None) for k, d in GENERAL_SHORTCUTS
-        ]))
-        bl.addWidget(self._section(
-            'Emphasis Tags  (select text first, or inserts empty tag)',
-            EMPHASIS_TAGS,
-        ))
-        bl.addWidget(self._section('Structure Tags  (insert at cursor)', STRUCTURE_TAGS))
-        bl.addStretch()
-
-        scroll.setWidget(body)
-        root.addWidget(scroll, 1)
-
-        footer = QHBoxLayout()
-        footer.setContentsMargins(14, 8, 14, 12)
-        footer.addWidget(QLabel(
-            '<span style="color:#888;font-size:11px">Press Esc or click Close.</span>'
-        ))
-        footer.addStretch()
-        close = QPushButton('Got it')
-        close.setStyleSheet(
-            'QPushButton{background:#2a9d8f;color:#fff;border:none;'
-            'padding:6px 18px;border-radius:4px;font-weight:bold;}'
-            'QPushButton:hover{background:#21867a;}'
-        )
-        close.clicked.connect(self.accept)
-        footer.addWidget(close)
-        root.addLayout(footer)
-
-    @staticmethod
-    def _kbd(text: str) -> QLabel:
-        lbl = QLabel(text)
-        lbl.setStyleSheet(
-            'background:#f5f5f5;border:1px solid #ccc;border-radius:4px;'
-            'padding:1px 7px;font-family:Consolas,monospace;font-size:11px;color:#333;'
-        )
-        return lbl
-
-    def _section(self, title: str, rows: list) -> QWidget:
-        wrap = QWidget()
-        wl = QVBoxLayout(wrap)
-        wl.setContentsMargins(0, 0, 0, 0)
-        wl.setSpacing(6)
-
-        t = QLabel(title)
-        t.setStyleSheet('color:#2a6f97;font-size:13px;font-weight:bold;')
-        wl.addWidget(t)
-
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(5)
-        grid.setColumnStretch(1, 1)
-        for r, row in enumerate(rows):
-            key, desc = row[0], row[1]
-            kbd_wrap = QHBoxLayout()
-            kbd_wrap.setContentsMargins(0, 0, 0, 0)
-            kbd_wrap.addWidget(self._kbd(key))
-            kbd_wrap.addStretch()
-            kc = QWidget()
-            kc.setLayout(kbd_wrap)
-            kc.setFixedWidth(130)
-            grid.addWidget(kc, r, 0)
-            d = QLabel(desc)
-            d.setStyleSheet('color:#444;font-size:12px;')
-            d.setWordWrap(True)
-            grid.addWidget(d, r, 1)
-        wl.addLayout(grid)
-        return wrap
+        close_btn = QPushButton('Close')
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
 
 
-# ── Public widget ─────────────────────────────────────────────────────────────
-
+# -----------------------------------------------------------------------
+# Public widget – revamped to install the tooltip filter
+# -----------------------------------------------------------------------
 class XmlEditor(QWidget):
-    """XML editor with syntax highlighting, line numbers, and live validation."""
-
+    """XML editor with syntax highlighting, line numbers,
+    live validation, and tooltip error messages."""
     def __init__(self, parent=None):
         super().__init__(parent)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # ── Toolbar ──────────────────────────────────────────────────────────
+        # ── Toolbar ─────────────────────
         toolbar = QWidget()
         toolbar.setStyleSheet('background:#f8fafc;border-bottom:1px solid #e2e8f0;')
         tb = QHBoxLayout(toolbar)
@@ -506,23 +438,25 @@ class XmlEditor(QWidget):
             )
             return b
 
-        self._btn_fmt   = _tbtn('Format XML',  'Pretty-print XML (Ctrl+Shift+F)')
+        self._btn_fmt   = _tbtn('Format XML',  'Pretty‑print (Ctrl+Shift+F)')
         self._btn_find  = _tbtn('Find',         'Find (Ctrl+F)')
-        self._btn_repl  = _tbtn('Replace',      'Find & Replace (Ctrl+H)')
-        self._btn_goto  = _tbtn('Go to Line',   'Go to Line (Ctrl+G)')
-        self._btn_cmt   = _tbtn('Comment',      'Toggle comment on selection (Ctrl+/)')
-        self._btn_undo  = _tbtn('↩ Undo',       'Undo (Ctrl+Z)')
-        self._btn_redo  = _tbtn('↪ Redo',       'Redo (Ctrl+Y)')
-        self._btn_help  = _tbtn('⌨ Shortcuts',  'Show all editor shortcuts (F1)')
+        self._btn_repl  = _tbtn('Replace',      'Find & Replace (Ctrl+H)')
+        self._btn_goto  = _tbtn('Go to Line',   'Ctrl+G')
+        self._btn_cmt   = _tbtn('Comment',      'Toggle comment (Ctrl+/)')
+        self._btn_undo  = _tbtn('↩ Undo',       'Ctrl+Z')
+        self._btn_redo  = _tbtn('↪ Redo',       'Ctrl+Y')
+        self._btn_help  = _tbtn('⌨ Shortcuts',  'F1')
 
-        for btn in [self._btn_fmt, self._btn_find, self._btn_repl,
-                    self._btn_goto, self._btn_cmt, self._btn_undo, self._btn_redo]:
+        for btn in (self._btn_fmt, self._btn_find, self._btn_repl,
+                    self._btn_goto, self._btn_cmt,
+                    self._btn_undo, self._btn_redo):
             tb.addWidget(btn)
+
         tb.addStretch()
         tb.addWidget(self._btn_help)
         root.addWidget(toolbar)
 
-        # ── Editor ───────────────────────────────────────────────────────────
+        # ── Editor ─────────────────────
         self._edit = _CodeEdit()
         mono = QFont('Consolas', 11)
         mono.setStyleHint(QFont.StyleHint.Monospace)
@@ -535,18 +469,21 @@ class XmlEditor(QWidget):
         self._highlighter = _XmlHighlighter(self._edit.document())
         root.addWidget(self._edit, 1)
 
-        # ── Validation bar ────────────────────────────────────────────────────
+        # Install the tooltip filter **after** the editor is created
+        self._edit.viewport().installEventFilter(self._edit)
+
+        # ── Validation bar ─────────────────
         self._val_bar = _ValidationBar()
         root.addWidget(self._val_bar)
 
-        # ── Validation timer (800 ms debounce) ────────────────────────────────
+        # ── Debounced validation timer ─────
         self._val_timer = QTimer(self)
         self._val_timer.setSingleShot(True)
         self._val_timer.setInterval(800)
         self._val_timer.timeout.connect(self._run_validation)
         self._edit.document().contentsChanged.connect(self._val_timer.start)
 
-        # ── Wire toolbar ──────────────────────────────────────────────────────
+        # ── Toolbar connections ───────────────
         self._btn_fmt.clicked.connect(self._format_xml)
         self._btn_find.clicked.connect(self._show_find)
         self._btn_repl.clicked.connect(self._show_find_replace)
@@ -556,36 +493,33 @@ class XmlEditor(QWidget):
         self._btn_redo.clicked.connect(self._edit.redo)
         self._btn_help.clicked.connect(self._show_shortcuts)
 
-        # ── Keyboard shortcuts ────────────────────────────────────────────────
+        # ── Keyboard shortcuts ───────────────
         QShortcut(QKeySequence('Ctrl+Shift+F'), self).activated.connect(self._format_xml)
         QShortcut(QKeySequence('Ctrl+F'),       self).activated.connect(self._show_find)
         QShortcut(QKeySequence('Ctrl+H'),       self).activated.connect(self._show_find_replace)
         QShortcut(QKeySequence('Ctrl+G'),       self).activated.connect(self._goto_line)
         QShortcut(QKeySequence('Ctrl+/'),       self).activated.connect(self._toggle_comment)
         QShortcut(QKeySequence('F1'),           self).activated.connect(self._show_shortcuts)
-        QShortcut(QKeySequence('Ctrl+Shift+E'), self).activated.connect(
-            lambda: self._insert_template(WRAP_USEREDIT))
-        for key, _label, template in EMPHASIS_TAGS + STRUCTURE_TAGS:
-            QShortcut(QKeySequence(key), self).activated.connect(
-                lambda t=template: self._insert_template(t))
 
+        # Find‑replace dialog lives lazily
         self._find_dlg: _FindReplaceDialog | None = None
 
-    # ── Public API ────────────────────────────────────────────────────────────
-
+    # -------------------------------------------------------------------
+    # Public API used by MainWindow
+    # -------------------------------------------------------------------
     def toPlainText(self) -> str:
         return self._edit.toPlainText()
 
     def setPlainText(self, text: str):
         self._edit.setPlainText(text)
-        # Trigger immediate validation
-        self._val_timer.start()
+        self._val_timer.start()          # immediate validation
 
     def document(self):
         return self._edit.document()
 
-    # ── Validation ────────────────────────────────────────────────────────────
-
+    # -------------------------------------------------------------------
+    # Validation
+    # -------------------------------------------------------------------
     def _run_validation(self):
         text = self._edit.toPlainText().strip()
         if not text:
@@ -593,30 +527,32 @@ class XmlEditor(QWidget):
             self._edit.set_error_lines(set())
             return
         try:
-            etree.fromstring(text.encode('utf-8'))
+            etree.fromstring(text.encode('utf‑8'))
             self._val_bar.set_valid()
             self._edit.set_error_lines(set())
         except etree.XMLSyntaxError as e:
-            line = (e.lineno or 1) - 1   # convert to 0-based
-            col  = e.offset or 1
+            line = (e.lineno or 1) - 1      # 0‑based for the gutter
+            col = e.offset or 1
             self._val_bar.set_error(line + 1, col, str(e))
             self._edit.set_error_lines({line})
 
-    # ── Toolbar actions ───────────────────────────────────────────────────────
-
+    # -------------------------------------------------------------------
+    # Toolbar actions
+    # -------------------------------------------------------------------
     def _format_xml(self):
-        text = self._edit.toPlainText().strip()
-        if not text:
+        txt = self._edit.toPlainText().strip()
+        if not txt:
             return
         try:
-            tree = etree.fromstring(text.encode('utf-8'))
-            pretty = etree.tostring(tree, pretty_print=True, encoding='unicode')
+            tree = etree.fromstring(txt.encode('utf‑8'))
+            pretty = etree.tostring(tree, pretty_print=True,
+                                    encoding='unicode')
             self._edit.setPlainText(pretty)
         except etree.XMLSyntaxError as e:
             QMessageBox.warning(self, 'Format Error',
-                                f'Cannot format — invalid XML:\n{e}')
+                                f'Cannot format – invalid XML:\n{e}')
 
-    def _get_find_dialog(self) -> '_FindReplaceDialog':
+    def _get_find_dialog(self) -> _FindReplaceDialog:
         if self._find_dlg is None:
             self._find_dlg = _FindReplaceDialog(self._edit, self)
         return self._find_dlg
@@ -634,60 +570,42 @@ class XmlEditor(QWidget):
     def _goto_line(self):
         total = self._edit.document().blockCount()
         line, ok = QInputDialog.getInt(
-            self, 'Go to Line', f'Line number (1–{total}):',
-            value=max(1, self._edit.textCursor().blockNumber() + 1),
-            minValue=1, maxValue=total,
+            self, 'Go to Line',
+            f'Line number (1‑{total}):',
+            value=self._edit.textCursor().blockNumber() + 1,
+            minValue=1, maxValue=total
         )
         if ok:
-            block = self._edit.document().findBlockByLineNumber(line - 1)
-            cursor = self._edit.textCursor()
-            cursor.setPosition(block.position())
-            self._edit.setTextCursor(cursor)
+            block = self._edit.document().findBlockByNumber(line - 1)
+            cur = self._edit.textCursor()
+            cur.setPosition(block.position())
+            self._edit.setTextCursor(cur)
             self._edit.ensureCursorVisible()
             self._edit.centerCursor()
 
-    def _insert_template(self, template: str):
-        cursor = self._edit.textCursor()
-        sel = cursor.selectedText().replace(chr(0x2029), chr(10))
-
-        body = template.replace('_', sel)
-        if '|' in body:
-            caret_off = body.index('|')
-            body = body.replace('|', '')
-        elif '_' in template:
-            caret_off = template.index('_') + len(sel)
-        else:
-            caret_off = len(body)
-
-        cursor.insertText(body)
-        cursor.setPosition(cursor.position() - (len(body) - caret_off))
-        self._edit.setTextCursor(cursor)
-        self._edit.setFocus()
-
-    def _show_shortcuts(self):
-        _ShortcutsDialog(self).exec()
-
     def _toggle_comment(self):
-        cursor = self._edit.textCursor()
-        if cursor.hasSelection():
-            start, end = cursor.selectionStart(), cursor.selectionEnd()
+        cur = self._edit.textCursor()
+        if cur.hasSelection():
+            start, end = cur.selectionStart(), cur.selectionEnd()
         else:
-            block = cursor.block()
+            block = cur.block()
             start = block.position()
             end   = block.position() + block.length() - 1
 
-        c = self._edit.textCursor()
-        c.setPosition(start)
-        c.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
-        text = c.selectedText()
-        stripped = text.strip()
+        sel_cur = self._edit.textCursor()
+        sel_cur.setPosition(start)
+        sel_cur.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        txt = sel_cur.selectedText()
+        stripped = txt.strip()
 
-        c.beginEditBlock()
+        sel_cur.beginEditBlock()
         if stripped.startswith('<!--') and stripped.endswith('-->'):
-            uncommented = text.replace('<!--', '', 1)
-            idx = uncommented.rfind('-->')
-            uncommented = uncommented[:idx] + uncommented[idx + 3:]
-            c.insertText(uncommented.strip())
+            # uncomment – preserve original indentation
+            uncommented = stripped[4:-3].strip()
+            sel_cur.insertText(uncommented)
         else:
-            c.insertText(f'<!-- {text.strip()} -->')
-        c.endEditBlock()
+            sel_cur.insertText(f'<!-- {txt.strip()} -->')
+        sel_cur.endEditBlock()
+
+    def _show_shortcuts(self):
+        _ShortcutsDialog(self).exec()

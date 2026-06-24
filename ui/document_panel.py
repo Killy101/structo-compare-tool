@@ -1,3 +1,4 @@
+# ui/document_panel.py
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QTextEdit
 from PySide6.QtGui import QTextCursor, QColor
 from PySide6.QtCore import Qt, QTimer
@@ -19,10 +20,6 @@ _CSS = """
   i, em,
   span[style*="font-style:italic"]  { font-style: italic; }
 
-  /* Source-PDF text decorations — inline styles carry the authoritative value;
-     these rules are fallbacks for Qt's renderer.  The combined rule must come
-     LAST so it wins when both decorations are present (higher specificity via
-     two attribute selectors). */
   s, del, strike                    { text-decoration: line-through; }
   span[style*="line-through"]       { text-decoration: line-through; }
   span[style*="underline"]          { text-decoration: underline; }
@@ -62,6 +59,7 @@ class DocumentPanel(QWidget):
         self.browser.setHtml(_PLACEHOLDER)
         layout.addWidget(self.browser)
 
+    # -------------------------------------------------------------------
     def set_html(self, content: str):
         self.browser.setReadOnly(True)
         self.browser.setStyleSheet(_STYLE_VIEW)
@@ -69,27 +67,28 @@ class DocumentPanel(QWidget):
             f'<html><head>{_CSS}</head><body>{content}</body></html>'
         )
 
+    # -------------------------------------------------------------------
     def set_editable(self, text: str):
-        """Switch panel to plain-text editing mode — user can click anywhere and type."""
+        """Switch panel to plain‑text editing mode."""
         self.browser.setReadOnly(False)
         self.browser.setStyleSheet(_STYLE_EDIT)
         self.browser.setPlainText(text)
 
+    # -------------------------------------------------------------------
     def scroll_to_anchor(self, anchor: str):
         if not anchor:
             return
         cursor = self._cursor_at_anchor(anchor)
-        if cursor is not None:
+        if cursor:
             self.browser.setTextCursor(cursor)
             self.browser.ensureCursorVisible()
             self._flash(cursor)
 
+    # -------------------------------------------------------------------
     def _cursor_at_anchor(self, anchor: str):
-        """Find a text cursor positioned at the block carrying the anchor name.
-
-        The anchor element contains a zero-width space (U+200B) so that Qt
-        creates a real text fragment for it — empty <a name> elements have no
-        fragment and are never found by this walk.
+        """
+        Walk the document looking for a fragment whose format is an anchor
+        and whose name matches ``anchor``.
         """
         doc = self.browser.document()
         block = doc.begin()
@@ -98,36 +97,39 @@ class DocumentPanel(QWidget):
             while not it.atEnd():
                 frag = it.fragment()
                 fmt = frag.charFormat()
-                if fmt.isAnchor():
-                    names = fmt.anchorNames()
-                    if anchor in names:
-                        c = self.browser.textCursor()
-                        c.setPosition(frag.position())
-                        return c
+                if fmt.isAnchor() and anchor in fmt.anchorNames():
+                    c = self.browser.textCursor()
+                    c.setPosition(frag.position())
+                    return c
                 it += 1
             block = block.next()
         return None
 
-    def _flash(self, cursor: QTextCursor):
+    # -------------------------------------------------------------------
+    def _flash(self, cursor):
         sel = QTextEdit.ExtraSelection()
         flash_cursor = QTextCursor(cursor)
         flash_cursor.select(QTextCursor.SelectionType.LineUnderCursor)
         sel.cursor = flash_cursor
         sel.format.setBackground(QColor('#fff3a0'))
-        sel.format.setProperty(0x100000 + 1, True)  # FullWidthSelection
+        sel.format.setProperty(0x100000 + 1, True)      # FullWidthSelection
         self.browser.setExtraSelections([sel])
         QTimer.singleShot(1300, lambda: self.browser.setExtraSelections([]))
 
+    # -------------------------------------------------------------------
     def clear(self):
         self.browser.setReadOnly(True)
         self.browser.setStyleSheet(_STYLE_VIEW)
         self.browser.setHtml(_PLACEHOLDER)
 
+    # -------------------------------------------------------------------
     def scroll_fraction(self) -> float:
         sb = self.browser.verticalScrollBar()
         mx = sb.maximum()
         return sb.value() / mx if mx > 0 else 0.0
 
+    # -------------------------------------------------------------------
     def set_scroll_fraction(self, frac: float):
         sb = self.browser.verticalScrollBar()
-        sb.setValue(int(sb.maximum() * frac))
+        if sb.maximum() > 0:
+            sb.setValue(int(sb.maximum() * frac))

@@ -760,11 +760,18 @@ class MainWindow(QMainWindow):
 
     def _on_compare_done(self):
         w = self._worker
-        self._old_doc       = w.old_doc
-        self._new_doc       = w.new_doc
+        if w is None:
+            self._status.showMessage('Comparison worker failed to initialize.')
+            return
+        if w.old_doc is None or w.new_doc is None:
+            self._status.showMessage('Comparison completed without document data.')
+            return
+
+        self._old_doc = w.old_doc
+        self._new_doc = w.new_doc
         self._old_diff_html = w.old_html
         self._new_diff_html = w.new_html
-        self._view_raw      = False
+        self._view_raw = False
         self.btn_view.setText('PDF Page View')
 
         self.old_panel.set_html(self._old_diff_html)
@@ -1057,7 +1064,7 @@ class MainWindow(QMainWindow):
 
     # ── Edit text mode ────────────────────────────────────────────────────────
     def _toggle_edit_mode(self):
-        if self._old_doc is None:
+        if self._old_doc is None or self._new_doc is None:
             self._status.showMessage('Run a comparison first before editing text.')
             return
 
