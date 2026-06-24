@@ -29,8 +29,8 @@ _CSS = """
     text-decoration: underline line-through;
   }
 
-  span[style*="background:#ffb3b3"] { background: #ffb3b3; border-radius: 3px; }
-  span[style*="background:#b3ffb3"] { background: #b3ffb3; border-radius: 3px; }
+  span[style*="color:#c0392b"] { color: #c0392b; }
+  span[style*="color:#1a7a3c"] { color: #1a7a3c; }
 </style>
 """
 

@@ -34,8 +34,8 @@ def test_build_diff_html_returns_changes_list():
     assert len(changes) == 1
     assert changes[0]['kind'] == 'mod'
     assert changes[0]['id'] == 'c1'
-    assert 'background:#ffb3b3' in old_html  # removed word highlight
-    assert 'background:#b3ffb3' in new_html  # added word highlight
+    assert 'color:#c0392b' in old_html   # removed word red foreground
+    assert 'color:#1a7a3c' in new_html   # added word green foreground
 
 
 def test_added_and_deleted_blocks_tracked():
@@ -68,8 +68,8 @@ def test_modification_is_paired_del_add_and_highlighted():
     old_html, new_html, sidebar, changes = build_diff_html(old, new)
     assert len(changes) == 1
     assert changes[0] == {'id': 'c1', 'kind': 'mod', 'old': '4', 'new': '3'}
-    assert '#ffb3b3' in old_html      # deleted word red in old panel
-    assert '#b3ffb3' in new_html      # added word green in new panel
+    assert '#c0392b' in old_html      # deleted word red foreground in old panel
+    assert '#1a7a3c' in new_html      # added word green foreground in new panel
     assert 'bmod' in sidebar          # orange "Modified" badge in change list
 
 
@@ -78,8 +78,8 @@ def test_pure_addition_is_green_only():
     new = _doc([(0, 'line one'), (0, 'inserted line'), (0, 'line two')])
     old_html, new_html, _, changes = build_diff_html(old, new)
     assert [c['kind'] for c in changes] == ['add']
-    assert '#b3ffb3' in new_html
-    assert '#ffb3b3' not in old_html
+    assert '#1a7a3c' in new_html
+    assert '#c0392b' not in old_html
 
 
 def test_pure_deletion_is_red_only():
@@ -87,5 +87,5 @@ def test_pure_deletion_is_red_only():
     new = _doc([(0, 'keep this'), (0, 'keep that')])
     old_html, new_html, _, changes = build_diff_html(old, new)
     assert [c['kind'] for c in changes] == ['del']
-    assert '#ffb3b3' in old_html
-    assert '#b3ffb3' not in new_html
+    assert '#c0392b' in old_html
+    assert '#1a7a3c' not in new_html

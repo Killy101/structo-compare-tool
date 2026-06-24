@@ -37,8 +37,12 @@ class _Token:
     src_strike: bool = False
     underline: bool = False
 
-    def render(self, bg: str = "") -> str:
-        """Render the token as a ``<span>`` with the appropriate CSS."""
+    def render(self, highlight: str = "") -> str:
+        """Render the token as a ``<span>`` with the appropriate CSS.
+
+        *highlight* is ``""`` (unchanged), ``"del"`` (removed), or ``"add"`` (inserted).
+        Source-level strikethrough is preserved; diff decoration is foreground colour only.
+        """
         t = _html.escape(self.word)
         styles: List[str] = []
         decorations: List[str] = []
@@ -51,13 +55,20 @@ class _Token:
             decorations.append("underline")
         if self.src_strike:
             decorations.append("line-through")
-            if not bg:
+            if not highlight:
                 styles.append("color:#888")
 
         if decorations:
             styles.append("text-decoration:" + " ".join(decorations))
-        if bg:
-            styles.append(f"background:{bg}")
+
+        if highlight == "del":
+            styles.append("color:#c0392b")       # red foreground
+            styles.append("background:#ffeaea")  # very light pink tint
+            styles.append("border-radius:3px")
+            styles.append("padding:0 2px")
+        elif highlight == "add":
+            styles.append("color:#1a7a3c")       # dark green foreground
+            styles.append("background:#eafaf1")  # very light green tint
             styles.append("border-radius:3px")
             styles.append("padding:0 2px")
 
@@ -91,21 +102,33 @@ def _flatten(blocks: List[TextBlock]) -> List[str]:
 # -----------------------------------------------------------------------
 # Render one panel, highlighting changed words and dropping nav anchors.
 # -----------------------------------------------------------------------
-def _p(inner: str, indent: int = 0) -> str:
+def _p(inner: str, indent: int = 0, bg: str = "") -> str:
     """Wrap *inner* in a paragraph, reproducing the source indentation with
-    non‑breaking spaces (the panels normalise these back when re‑extracting)."""
+    non‑breaking spaces (the panels normalise these back when re‑extracting).
+
+    *bg* is an optional paragraph-level background band colour rendered when
+    the paragraph contains at least one changed word.
+    """
     pad = "&nbsp;" * indent if indent else ""
-    return f'<p style="margin:3px 0;line-height:1.6">{pad}{inner}</p>\n'
+    style = "margin:3px 0;line-height:1.6"
+    if bg:
+        style += f";background:{bg};padding:2px 6px;border-radius:3px"
+    return f'<p style="{style}">{pad}{inner}</p>\n'
 
 
 def _render_panel(blocks: List[TextBlock], changed: List[bool],
-                  anchors: dict, bg: str) -> str:
+                  anchors: dict, highlight_mode: str) -> str:
     """Render *blocks*, highlighting words whose flat index is flagged in
     *changed* and emitting a navigation anchor where *anchors* has one.
+
+    *highlight_mode* is ``"del"`` or ``"add"``, driving both word-level
+    foreground colour and the paragraph background band.
 
     The word iteration order here is identical to :func:`_flatten`, so the
     running global index ``g`` stays aligned with ``changed`` / ``anchors``.
     """
+    para_bg = "#fff8f0" if highlight_mode == "del" else "#f0fff8"
+
     out: List[str] = []
     g = 0
     for block in blocks:
@@ -113,6 +136,7 @@ def _render_panel(blocks: List[TextBlock], changed: List[bool],
             out.append(_p(""))
             continue
         pieces: List[str] = []
+        block_has_change = False
         for word, span in _block_words(block):
             tok = _Token(
                 word=word,
@@ -121,11 +145,15 @@ def _render_panel(blocks: List[TextBlock], changed: List[bool],
                 src_strike=span.strikethrough,
                 underline=span.underline,
             )
+            word_changed = changed[g]
+            if word_changed:
+                block_has_change = True
             cid = anchors.get(g)
             a_tag = f'<a name="{cid}">&#8203;</a>' if cid else ""
-            pieces.append(a_tag + tok.render(bg=bg if changed[g] else ""))
+            pieces.append(a_tag + tok.render(highlight=highlight_mode if word_changed else ""))
             g += 1
-        out.append(_p(" ".join(pieces), indent=block.indent))
+        out.append(_p(" ".join(pieces), indent=block.indent,
+                      bg=para_bg if block_has_change else ""))
     return "".join(out)
 
 
@@ -237,8 +265,8 @@ def build_diff_html(old_doc: Document, new_doc: Document) -> Tuple[str, str, str
 
         changes.append({"id": cid, "kind": kind, "old": old_txt, "new": new_txt})
 
-    old_html = _render_panel(old_blocks, old_changed, old_anchors, "#ffb3b3")
-    new_html = _render_panel(new_blocks, new_changed, new_anchors, "#b3ffb3")
+    old_html = _render_panel(old_blocks, old_changed, old_anchors, "del")
+    new_html = _render_panel(new_blocks, new_changed, new_anchors, "add")
     sidebar_html = _build_sidebar(sidebar_items, stats)
     return old_html, new_html, sidebar_html, changes
 
