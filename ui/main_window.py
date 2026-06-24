@@ -515,7 +515,6 @@ class MainWindow(QMainWindow):
             ('#b3ffb3', 'Added'),
             ('#ffffa0', 'Modified (new)'),
             ('#ffd6d6', 'Modified (old)'),
-            ('#ddd0ff', 'Emphasis change'),
         ]:
             leg.addWidget(_legend_chip(color, label))
             leg.addSpacing(4)
@@ -595,7 +594,7 @@ class MainWindow(QMainWindow):
         self._old_diff_html = w.old_html
         self._new_diff_html = w.new_html
         self._view_raw      = False
-        self.btn_view.setText('PDF Raw View')
+        self.btn_view.setText('PDF Page View')
 
         self.old_panel.set_html(self._old_diff_html)
         self.new_panel.set_html(self._new_diff_html)
@@ -676,7 +675,6 @@ class MainWindow(QMainWindow):
   span[style*="background:#b3ffb3"] { background:#b3ffb3; border-radius:3px; }
   span[style*="background:#ffffa0"] { background:#ffffa0; border-radius:3px; }
   span[style*="background:#ffd6d6"] { background:#ffd6d6; border-radius:3px; }
-  span[style*="background:#ddd0ff"] { background:#ddd0ff; border-radius:3px; }
 </style>"""
         return f"""<!DOCTYPE html>
 <html lang="en">
@@ -693,7 +691,6 @@ class MainWindow(QMainWindow):
   <span class="chip" style="background:#b3ffb3">Added</span>
   <span class="chip" style="background:#ffffa0">Modified (new)</span>
   <span class="chip" style="background:#ffd6d6">Modified (old)</span>
-  <span class="chip" style="background:#ddd0ff">Emphasis change</span>
 </div>
 <div class="panels">
   <div class="panel">
@@ -762,9 +759,9 @@ class MainWindow(QMainWindow):
             kind, anchor = 'mod', raw   # treat as two-panel nav
 
         # Route to the correct panel(s):
-        #   del  → only old panel has the anchor
-        #   add  → only new panel has the anchor
-        #   mod / emph → both panels
+        #   del → only old panel has the anchor
+        #   add → only new panel has the anchor
+        #   mod → both panels
         if kind == 'del':
             self.old_panel.scroll_to_anchor(anchor)
         elif kind == 'add':
