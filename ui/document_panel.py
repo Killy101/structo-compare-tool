@@ -39,14 +39,16 @@ _PLACEHOLDER = _CSS + """
 """
 
 _STYLE_VIEW = 'background:#ffffff;border:none;'
-_STYLE_EDIT = (
-    'QTextEdit{background:#f8fafc;color:#1e293b;border:none;'
-    'font-family:"Consolas","Courier New",monospace;font-size:12px;'
-    'line-height:1.6;padding:10px;}'
-)
 
 
 class DocumentPanel(QWidget):
+    """Side‑by‑side compare panel.
+
+    The panel is **always editable** so analysts can adjust the extracted
+    text in place (fixing alignment / OCR slips) and then re‑compare. The
+    diff highlighting is re‑rendered from the edited text on demand.
+    """
+
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
@@ -54,25 +56,37 @@ class DocumentPanel(QWidget):
         layout.setSpacing(0)
 
         self.browser = QTextEdit()
-        self.browser.setReadOnly(True)
+        self.browser.setReadOnly(False)
+        self.browser.setAcceptRichText(False)   # typed text stays plain
         self.browser.setStyleSheet(_STYLE_VIEW)
         self.browser.setHtml(_PLACEHOLDER)
         layout.addWidget(self.browser)
 
     # -------------------------------------------------------------------
     def set_html(self, content: str):
-        self.browser.setReadOnly(True)
         self.browser.setStyleSheet(_STYLE_VIEW)
+        # Preserve the caret/scroll position when re‑rendering after a compare.
+        sb = self.browser.verticalScrollBar()
+        pos = sb.value()
         self.browser.setHtml(
             f'<html><head>{_CSS}</head><body>{content}</body></html>'
         )
+        sb.setValue(min(pos, sb.maximum()))
 
     # -------------------------------------------------------------------
-    def set_editable(self, text: str):
-        """Switch panel to plain‑text editing mode."""
-        self.browser.setReadOnly(False)
-        self.browser.setStyleSheet(_STYLE_EDIT)
+    def set_plain(self, text: str):
+        """Load layout‑preserving plain text for direct editing."""
+        self.browser.setStyleSheet(_STYLE_VIEW)
         self.browser.setPlainText(text)
+
+    # -------------------------------------------------------------------
+    def edited_text(self) -> str:
+        """Visible text with non‑breaking spaces normalised back to spaces.
+
+        Indentation rendered as ``&nbsp;`` in the diff view comes back as
+        U+00A0; converting it lets the re‑extractor recover indent levels.
+        """
+        return self.browser.toPlainText().replace('\xa0', ' ')
 
     # -------------------------------------------------------------------
     def scroll_to_anchor(self, anchor: str):
@@ -118,7 +132,6 @@ class DocumentPanel(QWidget):
 
     # -------------------------------------------------------------------
     def clear(self):
-        self.browser.setReadOnly(True)
         self.browser.setStyleSheet(_STYLE_VIEW)
         self.browser.setHtml(_PLACEHOLDER)
 

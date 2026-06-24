@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QSplitter, QPushButton, QFileDialog, QStatusBar,
     QLabel, QTextBrowser, QProgressBar, QCheckBox, QFrame, QLineEdit,
 )
-from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer
+from PySide6.QtCore import Qt, QThread, Signal, QUrl
 from PySide6.QtGui import QKeySequence, QShortcut, QTextDocument
 
 from ui.document_panel import DocumentPanel
@@ -14,18 +14,8 @@ from ui.xml_editor import XmlEditor
 from logic.pdf_extractor import extract_pdf, render_pdf_preview
 from logic.xml_extractor import extract_xml
 from logic.differ import build_diff_html
-from models.document import Document, TextBlock, TextSpan
-
-
-def _text_to_doc(text: str) -> Document:
-    """Convert plain text (one paragraph per non-empty line) to a Document."""
-    doc = Document()
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped:
-            block = TextBlock(spans=[TextSpan(text=stripped)])
-            doc.blocks.append(block)
-    return doc
+from logic.text_parser import text_to_doc as _text_to_doc
+from models.document import Document
 
 
 # ---------------------------------------------------------------------------
@@ -46,6 +36,7 @@ class _CompareWorker(QThread):
         self.old_html:     str = ''
         self.new_html:     str = ''
         self.sidebar_html: str = ''
+        self.changes:      list = []
 
     def run(self):
         try:
@@ -56,9 +47,8 @@ class _CompareWorker(QThread):
             self.new_doc = extract_pdf(self.new_path)
 
             self.progress.emit('Comparing documents…', 75)
-            self.old_html, self.new_html, self.sidebar_html = build_diff_html(
-                self.old_doc, self.new_doc
-            )
+            self.old_html, self.new_html, self.sidebar_html, self.changes = \
+                build_diff_html(self.old_doc, self.new_doc)
 
             self.progress.emit('Done', 100)
             self.done.emit()
@@ -114,6 +104,14 @@ def _sep() -> QFrame:
 # ---------------------------------------------------------------------------
 # Upload screen (page 0)
 # ---------------------------------------------------------------------------
+_ROW_BASE = ('QFrame{background:#f8fafc;border:1px dashed #cbd5e1;'
+             'border-radius:8px;}')
+_ROW_HOVER = ('QFrame{background:#eef2ff;border:2px dashed #6366f1;'
+              'border-radius:8px;}')
+_ROW_OK = ('QFrame{background:#f0fdf4;border:1px solid #86efac;'
+           'border-radius:8px;}')
+
+
 class _UploadPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -153,10 +151,7 @@ class _UploadPage(QWidget):
         # Drop-zone style row helper
         def file_row(icon: str, label: str, optional: bool = False):
             row = QFrame()
-            row.setStyleSheet(
-                'QFrame{background:#f8fafc;border:1px dashed #cbd5e1;'
-                'border-radius:8px;}'
-            )
+            row.setStyleSheet(_ROW_BASE)
             rl = QHBoxLayout(row)
             rl.setContentsMargins(14, 10, 14, 10)
             rl.setSpacing(10)
@@ -197,6 +192,8 @@ class _UploadPage(QWidget):
         card_layout.addWidget(self._new_row)
         card_layout.addWidget(self._xml_row)
 
+        self._rows = {'old': self._old_row, 'new': self._new_row, 'xml': self._xml_row}
+        self._default_lbl = 'Drop file here  ·  or browse'
         self.setAcceptDrops(True)
 
         # Compare button
@@ -273,6 +270,7 @@ class _UploadPage(QWidget):
         ok, msg = self._validate(kind, path)
         lbl    = {'old': self._old_lbl,    'new': self._new_lbl,    'xml': self._xml_lbl}[kind]
         status = {'old': self._old_status, 'new': self._new_status, 'xml': self._xml_status}[kind]
+        row    = self._rows[kind]
 
         if ok:
             setattr(self, f'{kind}_path', path)
@@ -280,29 +278,78 @@ class _UploadPage(QWidget):
             lbl.setStyleSheet('color:#334155;font-size:12px;background:transparent;border:none;')
             status.setText(msg)
             status.setStyleSheet('color:#059669;font-size:10px;background:transparent;border:none;')
+            row.setStyleSheet(_ROW_OK)
         else:
             setattr(self, f'{kind}_path', '')
             lbl.setText(os.path.basename(path))
             lbl.setStyleSheet('color:#334155;font-size:12px;background:transparent;border:none;')
             status.setText(msg)
             status.setStyleSheet('color:#dc2626;font-size:10px;background:transparent;border:none;')
+            row.setStyleSheet(_ROW_BASE)
 
         self._update_compare()
 
+    # ── Reset ──────────────────────────────────────────────────────────────────
+    def reset(self):
+        """Return the upload card to its pristine, empty state."""
+        self.old_path = self.new_path = self.xml_path = ''
+        for kind, (lbl, status, optional) in {
+            'old': (self._old_lbl, self._old_status, False),
+            'new': (self._new_lbl, self._new_status, False),
+            'xml': (self._xml_lbl, self._xml_status, True),
+        }.items():
+            lbl.setText(self._default_lbl)
+            lbl.setStyleSheet('color:#94a3b8;font-size:12px;background:transparent;border:none;')
+            status.setText('optional' if optional else '')
+            status.setStyleSheet('color:#94a3b8;font-size:10px;background:transparent;border:none;')
+            self._rows[kind].setStyleSheet(_ROW_BASE)
+        self._update_compare()
+
     # ── Drag and drop ──────────────────────────────────────────────────────────
+    def _row_kind_at(self, pos) -> str:
+        """Return the file-row kind under *pos*, or '' if none."""
+        widget = self.childAt(pos)
+        while widget is not None:
+            for kind, row in self._rows.items():
+                if widget is row:
+                    return kind
+            widget = widget.parentWidget()
+        return ''
+
+    def _clear_row_highlights(self):
+        for kind, row in self._rows.items():
+            path = getattr(self, f'{kind}_path')
+            row.setStyleSheet(_ROW_OK if path else _ROW_BASE)
+
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             event.acceptProposedAction()
 
+    def dragMoveEvent(self, event):
+        if not event.mimeData().hasUrls():
+            return
+        kind = self._row_kind_at(event.position().toPoint())
+        self._clear_row_highlights()
+        if kind:
+            self._rows[kind].setStyleSheet(_ROW_HOVER)
+        event.acceptProposedAction()
+
+    def dragLeaveEvent(self, event):
+        self._clear_row_highlights()
+
     def dropEvent(self, event):
         paths = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
-        # Route by extension; first PDF → old (if empty) else new.
+        target = self._row_kind_at(event.position().toPoint())
         for p in paths:
             ext = os.path.splitext(p)[1].lower()
-            if ext == '.pdf':
+            if target:                       # dropped onto a specific zone
+                self._set_file(target, p)
+                target = ''                  # only the first file goes to that zone
+            elif ext == '.pdf':
                 self._set_file('old' if not self.old_path else 'new', p)
             elif ext in ('.xml', '.xhtml', '.html', '.htm'):
                 self._set_file('xml', p)
+        self._clear_row_highlights()
         event.acceptProposedAction()
 
     def _update_compare(self):
@@ -378,7 +425,9 @@ class MainWindow(QMainWindow):
         self._worker:        _CompareWorker | None = None
         self._view_raw:      bool = False
         self._scroll_syncing: bool = False
-        self._edit_mode:     bool = False
+        self._changes:       list = []
+        self._change_index:  int = -1
+        self._pdf_zoom:      float = 2.0
 
         self._build_ui()
         self._wire_signals()
@@ -422,10 +471,49 @@ class MainWindow(QMainWindow):
             'color:#1e293b;font-size:17px;font-weight:bold;letter-spacing:1px;'
         )
 
-        self.btn_back    = _btn('← New Files',   '#64748b', '#475569')
-        self.btn_view    = _btn('PDF Page View',  '#64748b', '#475569')
-        self.btn_export  = _btn('Export HTML',    '#2563eb', '#1d4ed8')
-        self.btn_save    = _btn('Save XML As…',   '#dc2626', '#b91c1c')
+        self.btn_back     = _btn('＋ New',         '#64748b', '#475569')
+        self.btn_recompare = _btn('⟳ Re-Compare', '#059669', '#047857')
+        self.btn_view     = _btn('PDF Page View',  '#64748b', '#475569')
+        self.btn_export   = _btn('Export ▾',       '#2563eb', '#1d4ed8')
+        self.btn_save     = _btn('Save XML As…',   '#dc2626', '#b91c1c')
+
+        self.btn_recompare.setToolTip(
+            'Re-run the comparison from the (edited) panel text  ·  Ctrl+R')
+
+        # ── Change navigation (Beyond Compare-style prev/next) ───────────────
+        _nav_ss = (
+            'QPushButton{background:#f1f5f9;color:#334155;border:1px solid #e2e8f0;'
+            'border-radius:4px;padding:4px 9px;font-size:12px;font-weight:bold;}'
+            'QPushButton:hover{background:#e2e8f0;}'
+            'QPushButton:disabled{background:#f8fafc;color:#cbd5e1;}'
+        )
+        self.btn_prev_change = QPushButton('▲')
+        self.btn_prev_change.setStyleSheet(_nav_ss)
+        self.btn_prev_change.setToolTip('Previous change  ·  Shift+F3 / Alt+Up')
+        self.btn_next_change = QPushButton('▼')
+        self.btn_next_change.setStyleSheet(_nav_ss)
+        self.btn_next_change.setToolTip('Next change  ·  F3 / Alt+Down')
+        self._change_counter = QLabel('0 / 0')
+        self._change_counter.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._change_counter.setFixedWidth(64)
+        self._change_counter.setStyleSheet(
+            'color:#475569;font-size:12px;font-weight:bold;background:transparent;')
+
+        # ── Zoom controls (only meaningful in PDF Page View) ─────────────────
+        self.btn_zoom_out = QPushButton('－')
+        self.btn_zoom_out.setStyleSheet(_nav_ss)
+        self.btn_zoom_out.setToolTip('Zoom out  ·  Ctrl+-')
+        self.btn_zoom_in = QPushButton('＋')
+        self.btn_zoom_in.setStyleSheet(_nav_ss)
+        self.btn_zoom_in.setToolTip('Zoom in  ·  Ctrl++')
+        self._zoom_lbl = QLabel('100%')
+        self._zoom_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._zoom_lbl.setFixedWidth(46)
+        self._zoom_lbl.setStyleSheet(
+            'color:#475569;font-size:11px;background:transparent;')
+        self._zoom_widgets = [self.btn_zoom_out, self._zoom_lbl, self.btn_zoom_in]
+        for w in self._zoom_widgets:
+            w.setVisible(False)
 
         # Panel-visibility toggles (always in toolbar for quick access)
         _tgl_ss = (
@@ -444,10 +532,8 @@ class MainWindow(QMainWindow):
         self._btn_xml_tb.setCheckable(True)
         self._btn_xml_tb.setChecked(False)
 
-        # Edit-text mode
-        self.btn_edit_text = _btn('✎ Edit Text', '#6366f1', '#4f46e5')
-
         self._sync_cb = QCheckBox('Sync Scroll')
+        self._sync_cb.setChecked(True)
         self._sync_cb.setStyleSheet(
             'QCheckBox{color:#475569;font-size:12px;spacing:5px;}'
             'QCheckBox::indicator{width:14px;height:14px;}'
@@ -462,20 +548,27 @@ class MainWindow(QMainWindow):
 
         tb.addWidget(logo)
         tb.addStretch()
-        tb.addWidget(self.btn_back)
+        tb.addWidget(self.btn_prev_change)
+        tb.addWidget(self._change_counter)
+        tb.addWidget(self.btn_next_change)
+        tb.addWidget(_sep())
+        tb.addWidget(self.btn_recompare)
         tb.addWidget(_sep())
         tb.addWidget(self._btn_sidebar_tb)
         tb.addWidget(self._btn_xml_tb)
         tb.addWidget(_sep())
         tb.addWidget(self._sync_cb)
         tb.addWidget(self.btn_view)
-        tb.addWidget(_sep())
-        tb.addWidget(self.btn_edit_text)
+        tb.addWidget(self.btn_zoom_out)
+        tb.addWidget(self._zoom_lbl)
+        tb.addWidget(self.btn_zoom_in)
         tb.addWidget(_sep())
         tb.addWidget(self.btn_export)
         tb.addWidget(_sep())
         tb.addWidget(self._save_status)
         tb.addWidget(self.btn_save)
+        tb.addWidget(_sep())
+        tb.addWidget(self.btn_back)
         root.addWidget(toolbar)
 
         # ── Search bar (Ctrl+F, hidden by default) ────────────────────────────
@@ -534,7 +627,7 @@ class MainWindow(QMainWindow):
         ow = QVBoxLayout(old_wrap)
         ow.setContentsMargins(0, 0, 0, 0)
         ow.setSpacing(0)
-        ow.addWidget(_panel_header('Old  (PDF)'))
+        ow.addWidget(_panel_header('Old PDF  ·  editable — fix alignment then ⟳ Re-Compare'))
         self.old_panel = DocumentPanel()
         ow.addWidget(self.old_panel)
 
@@ -543,7 +636,7 @@ class MainWindow(QMainWindow):
         nw = QVBoxLayout(new_wrap)
         nw.setContentsMargins(0, 0, 0, 0)
         nw.setSpacing(0)
-        nw.addWidget(_panel_header('New  (PDF)'))
+        nw.addWidget(_panel_header('New PDF  ·  editable — fix alignment then ⟳ Re-Compare'))
         self.new_panel = DocumentPanel()
         nw.addWidget(self.new_panel)
 
@@ -686,23 +779,33 @@ class MainWindow(QMainWindow):
         # Workspace toolbar
         self.btn_back.clicked.connect(self._go_to_upload)
         self.btn_view.clicked.connect(self._toggle_view)
-        self.btn_export.clicked.connect(self._export_html)
+        self.btn_recompare.clicked.connect(self._recompare)
         self.btn_save.clicked.connect(self._save_xml)
-        self.btn_edit_text.clicked.connect(self._toggle_edit_mode)
-        QShortcut(QKeySequence('Ctrl+S'), self).activated.connect(self._save_xml)
+        self._build_export_menu()
 
-        # Auto-recompare: fires 800 ms after the user stops typing in either panel
-        self._recompare_timer = QTimer()
-        self._recompare_timer.setSingleShot(True)
-        self._recompare_timer.setInterval(800)
-        self._recompare_timer.timeout.connect(self._recompare_from_edited_text)
-        self.old_panel.browser.textChanged.connect(self._schedule_recompare)
-        self.new_panel.browser.textChanged.connect(self._schedule_recompare)
+        # Change navigation
+        self.btn_prev_change.clicked.connect(self._prev_change)
+        self.btn_next_change.clicked.connect(self._next_change)
+
+        # Zoom controls
+        self.btn_zoom_in.clicked.connect(lambda: self._adjust_zoom(1.25))
+        self.btn_zoom_out.clicked.connect(lambda: self._adjust_zoom(0.8))
+
+        # Keyboard shortcuts
+        QShortcut(QKeySequence('Ctrl+S'), self).activated.connect(self._save_xml)
+        QShortcut(QKeySequence('Ctrl+R'), self).activated.connect(self._recompare)
+        QShortcut(QKeySequence('F3'), self).activated.connect(self._next_change)
+        QShortcut(QKeySequence('Shift+F3'), self).activated.connect(self._prev_change)
+        QShortcut(QKeySequence('Alt+Down'), self).activated.connect(self._next_change)
+        QShortcut(QKeySequence('Alt+Up'), self).activated.connect(self._prev_change)
         QShortcut(QKeySequence('Ctrl+F'), self).activated.connect(self._open_search)
+        QShortcut(QKeySequence.StandardKey.ZoomIn, self).activated.connect(lambda: self._adjust_zoom(1.25))
+        QShortcut(QKeySequence.StandardKey.ZoomOut, self).activated.connect(lambda: self._adjust_zoom(0.8))
         QShortcut(QKeySequence('Escape'), self._search_bar).activated.connect(self._close_search)
 
         # Sync scroll
         self._sync_cb.toggled.connect(self._on_sync_toggled)
+        self._on_sync_toggled(self._sync_cb.isChecked())
 
         # Sidebar navigation
         self.sidebar.anchorClicked.connect(self._on_sidebar_click)
@@ -713,17 +816,61 @@ class MainWindow(QMainWindow):
 
     # ── Upload / compare flow ─────────────────────────────────────────────────
     def _go_to_upload(self):
-        if self._edit_mode:
-            self._edit_mode = False
-            self._recompare_timer.stop()
-            self.btn_edit_text.setText('✎ Edit Text')
-            self.btn_edit_text.setStyleSheet(
-                'QPushButton{background:#6366f1;color:#fff;border:none;'
-                'padding:6px 16px;border-radius:4px;font-weight:600;}'
-                'QPushButton:hover{background:#4f46e5;}'
-            )
+        """New session — completely reset the workspace and return to upload."""
+        self._reset_session()
         self._stack.setCurrentIndex(0)
         self._status.showMessage('Select files to begin a new comparison.')
+
+    def _reset_session(self):
+        """Clear every piece of session state so the next compare starts clean."""
+        # Stop any running worker so its callbacks can't touch fresh state.
+        if self._worker is not None:
+            try:
+                self._worker.done.disconnect()
+                self._worker.error.disconnect()
+                self._worker.progress.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            if self._worker.isRunning():
+                self._worker.requestInterruption()
+                self._worker.quit()
+                self._worker.wait(2000)
+            self._worker = None
+
+        # In-memory results
+        self._old_doc = None
+        self._new_doc = None
+        self._old_diff_html = ''
+        self._new_diff_html = ''
+        self._old_path = ''
+        self._new_path = ''
+        self._changes = []
+        self._change_index = -1
+        self._view_raw = False
+        self._pdf_zoom = 2.0
+
+        # Panels / sidebar / xml
+        self.old_panel.clear()
+        self.new_panel.clear()
+        self.sidebar.setHtml(
+            '<body style="background:#ffffff;color:#94a3b8;font-family:Arial;'
+            'font-size:12px;padding:12px;font-style:italic">'
+            'Run Compare to see changes.</body>'
+        )
+        self.xml_editor.setPlainText('')
+        self._xml_loaded = False
+        self._set_saved_state('')
+
+        # Toolbar / search / counters
+        self.btn_view.setText('PDF Page View')
+        for w in self._zoom_widgets:
+            w.setVisible(False)
+        self._update_change_counter()
+        self._close_search()
+        self._search_input.clear()
+
+        # Upload page fields
+        self._upload_page.reset()
 
     def _start_compare(self):
         up = self._upload_page
@@ -771,16 +918,23 @@ class MainWindow(QMainWindow):
         self._new_doc = w.new_doc
         self._old_diff_html = w.old_html
         self._new_diff_html = w.new_html
+        self._changes = w.changes
+        self._change_index = -1
         self._view_raw = False
         self.btn_view.setText('PDF Page View')
+        for wdg in self._zoom_widgets:
+            wdg.setVisible(False)
 
         self.old_panel.set_html(self._old_diff_html)
         self.new_panel.set_html(self._new_diff_html)
         self.sidebar.setHtml(w.sidebar_html)
+        self._update_change_counter()
 
         self._stack.setCurrentIndex(2)
+        n = len(self._changes)
         self._status.showMessage(
-            'Comparison complete. Edit XML below and Save XML As… when done.'
+            f'Comparison complete — {n} change{"s" if n != 1 else ""} found. '
+            'Edit either panel and click ⟳ Re-Compare to refresh, or F3 to step through changes.'
         )
 
     def _on_compare_error(self, msg: str):
@@ -791,29 +945,123 @@ class MainWindow(QMainWindow):
     def _toggle_view(self):
         if self._old_doc is None:
             return
-        if self._edit_mode:
-            self._status.showMessage('Exit edit mode first (click ✔ Done Editing).')
-            return
         self._view_raw = not self._view_raw
         if self._view_raw:
-            # Render actual PDF pages as images so users see true layout.
-            self._status.showMessage('Rendering PDF pages…')
-            try:
-                self.old_panel.set_html(render_pdf_preview(self._old_path))
-                self.new_panel.set_html(render_pdf_preview(self._new_path))
-                self.btn_view.setText('Compare View')
-                self._status.showMessage(
-                    'PDF Page View — true page layout.  Click Compare View to return.')
-            except Exception as e:
-                self._view_raw = False
-                self._status.showMessage(f'PDF Page View error: {e}')
+            self._render_pdf_pages()
+            self.btn_view.setText('Compare View')
+            for w in self._zoom_widgets:
+                w.setVisible(True)
         else:
             self.old_panel.set_html(self._old_diff_html)
             self.new_panel.set_html(self._new_diff_html)
             self.btn_view.setText('PDF Page View')
+            for w in self._zoom_widgets:
+                w.setVisible(False)
             self._status.showMessage('Compare View — diff highlights restored.')
 
-    # ── Export HTML ───────────────────────────────────────────────────────────
+    def _render_pdf_pages(self):
+        if not (self._old_path and self._new_path):
+            self._status.showMessage('PDF Page View needs the original PDF files.')
+            self._view_raw = False
+            return
+        self._status.showMessage('Rendering PDF pages…')
+        self._zoom_lbl.setText(f'{int(self._pdf_zoom / 2.0 * 100)}%')
+        try:
+            old_frac = self.old_panel.scroll_fraction()
+            new_frac = self.new_panel.scroll_fraction()
+            self.old_panel.set_html(render_pdf_preview(self._old_path, self._pdf_zoom))
+            self.new_panel.set_html(render_pdf_preview(self._new_path, self._pdf_zoom))
+            self.old_panel.set_scroll_fraction(old_frac)
+            self.new_panel.set_scroll_fraction(new_frac)
+            self._status.showMessage(
+                'PDF Page View — true page layout.  Use ＋ / － to zoom, '
+                'Compare View to return.')
+        except Exception as e:
+            self._view_raw = False
+            self._status.showMessage(f'PDF Page View error: {e}')
+
+    def _adjust_zoom(self, factor: float):
+        if not self._view_raw:
+            return
+        self._pdf_zoom = max(0.5, min(self._pdf_zoom * factor, 4.0))
+        self._render_pdf_pages()
+
+    # ── Change navigation ─────────────────────────────────────────────────────
+    def _update_change_counter(self):
+        n = len(self._changes)
+        cur = self._change_index + 1 if 0 <= self._change_index < n else 0
+        self._change_counter.setText(f'{cur} / {n}')
+        self.btn_prev_change.setEnabled(n > 0)
+        self.btn_next_change.setEnabled(n > 0)
+
+    def _goto_change(self, index: int):
+        n = len(self._changes)
+        if n == 0:
+            self._status.showMessage('No changes to navigate.')
+            return
+        if self._view_raw:          # navigation only makes sense in compare view
+            self._toggle_view()
+        self._change_index = index % n
+        ch = self._changes[self._change_index]
+        anchor, kind = ch['id'], ch['kind']
+        if kind == 'del':
+            self.old_panel.scroll_to_anchor(anchor)
+        elif kind == 'add':
+            self.new_panel.scroll_to_anchor(anchor)
+        else:
+            self.old_panel.scroll_to_anchor(anchor)
+            self.new_panel.scroll_to_anchor(anchor)
+        self._update_change_counter()
+        label = {'del': 'Deleted', 'add': 'Added', 'mod': 'Modified'}.get(kind, 'Change')
+        self._status.showMessage(
+            f'Change {self._change_index + 1} of {n}  ·  {label}')
+
+    def _next_change(self):
+        self._goto_change(self._change_index + 1)
+
+    def _prev_change(self):
+        start = self._change_index if self._change_index >= 0 else 0
+        self._goto_change(start - 1)
+
+    # ── Re-Compare from edited panel text ─────────────────────────────────────
+    def _recompare(self):
+        if self._old_doc is None or self._new_doc is None:
+            self._status.showMessage('Run a comparison first.')
+            return
+        if self._view_raw:
+            self._toggle_view()     # back to compare view before reading text
+
+        old_text = self.old_panel.edited_text()
+        new_text = self.new_panel.edited_text()
+        self._old_doc = _text_to_doc(old_text)
+        self._new_doc = _text_to_doc(new_text)
+
+        self._status.showMessage('Re-comparing…')
+        try:
+            self._old_diff_html, self._new_diff_html, sidebar_html, self._changes = \
+                build_diff_html(self._old_doc, self._new_doc)
+        except Exception as e:
+            self._status.showMessage(f'Re-compare error: {e}')
+            return
+
+        self.old_panel.set_html(self._old_diff_html)
+        self.new_panel.set_html(self._new_diff_html)
+        self.sidebar.setHtml(sidebar_html)
+        self._change_index = -1
+        self._update_change_counter()
+        n = len(self._changes)
+        self._status.showMessage(
+            f'Re-compare complete — {n} change{"s" if n != 1 else ""} found.')
+
+    # ── Export ────────────────────────────────────────────────────────────────
+    def _build_export_menu(self):
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        menu.addAction('Side-by-side HTML…', self._export_html)
+        menu.addAction('Change list (XML)…', self._export_xml)
+        menu.addAction('PDF report…', self._export_pdf_report)
+        self.btn_export.setMenu(menu)
+
     def _export_html(self):
         if not self._old_diff_html:
             self._status.showMessage('Run a comparison first before exporting.')
@@ -830,6 +1078,87 @@ class MainWindow(QMainWindow):
             self._status.showMessage(f'Exported: {path}')
         except Exception as e:
             self._status.showMessage(f'Export error: {e}')
+
+    def _export_xml(self):
+        if not self._changes:
+            self._status.showMessage('No changes to export — run a comparison first.')
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Export Change List as XML', '',
+            'XML Files (*.xml);;All Files (*)'
+        )
+        if not path:
+            return
+        import xml.sax.saxutils as _sx
+        old_name = os.path.basename(self._old_path) if self._old_path else 'old'
+        new_name = os.path.basename(self._new_path) if self._new_path else 'new'
+        lines = ['<?xml version="1.0" encoding="UTF-8"?>',
+                 f'<comparison old="{_sx.quoteattr(old_name)[1:-1]}" '
+                 f'new="{_sx.quoteattr(new_name)[1:-1]}" '
+                 f'changes="{len(self._changes)}">']
+        for ch in self._changes:
+            lines.append(f'  <change id="{ch["id"]}" type="{ch["kind"]}">')
+            if ch['old']:
+                lines.append(f'    <old>{_sx.escape(ch["old"])}</old>')
+            if ch['new']:
+                lines.append(f'    <new>{_sx.escape(ch["new"])}</new>')
+            lines.append('  </change>')
+        lines.append('</comparison>')
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(lines))
+            self._status.showMessage(f'Exported {len(self._changes)} changes: {path}')
+        except Exception as e:
+            self._status.showMessage(f'Export error: {e}')
+
+    def _export_pdf_report(self):
+        if not self._changes and not self._old_diff_html:
+            self._status.showMessage('Run a comparison first before exporting.')
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, 'Export PDF Report', '',
+            'PDF Files (*.pdf);;All Files (*)'
+        )
+        if not path:
+            return
+        try:
+            from PySide6.QtGui import QPdfWriter, QPageSize
+            writer = QPdfWriter(path)
+            writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+            doc = QTextDocument()
+            doc.setHtml(self._build_report_html())
+            doc.print_(writer)
+            self._status.showMessage(f'Exported PDF report: {path}')
+        except Exception as e:
+            self._status.showMessage(f'PDF export error: {e}')
+
+    def _build_report_html(self) -> str:
+        old_name = os.path.basename(self._old_path) if self._old_path else 'Old PDF'
+        new_name = os.path.basename(self._new_path) if self._new_path else 'New PDF'
+        from html import escape as _esc
+        counts = {'del': 0, 'add': 0, 'mod': 0}
+        for ch in self._changes:
+            counts[ch['kind']] = counts.get(ch['kind'], 0) + 1
+        rows = []
+        for i, ch in enumerate(self._changes, 1):
+            label = {'del': 'Deleted', 'add': 'Added', 'mod': 'Modified'}[ch['kind']]
+            old_c = f'<span style="color:#b91c1c">{_esc(ch["old"])}</span>' if ch['old'] else ''
+            new_c = f'<span style="color:#15803d">{_esc(ch["new"])}</span>' if ch['new'] else ''
+            rows.append(
+                f'<tr><td>{i}</td><td><b>{label}</b></td>'
+                f'<td>{old_c}</td><td>{new_c}</td></tr>')
+        table = ''.join(rows) or '<tr><td colspan="4">No changes detected.</td></tr>'
+        return f"""<html><body style="font-family:Arial,sans-serif;color:#1a1a1a">
+<h1 style="font-size:18px">Structo Compare Report</h1>
+<p style="font-size:12px;color:#475569">{_esc(old_name)} &rarr; {_esc(new_name)}</p>
+<p style="font-size:12px"><b>{counts['del']}</b> deleted &nbsp;
+<b>{counts['add']}</b> added &nbsp; <b>{counts['mod']}</b> modified &nbsp;
+(<b>{len(self._changes)}</b> total)</p>
+<table border="1" cellspacing="0" cellpadding="4" width="100%"
+ style="font-size:11px;border-collapse:collapse">
+<tr style="background:#f1f5f9"><th>#</th><th>Type</th><th>Old</th><th>New</th></tr>
+{table}
+</table></body></html>"""
 
     def _build_export_html(self) -> str:
         old_name = os.path.basename(self._old_path) if self._old_path else 'Old PDF'
@@ -1062,73 +1391,3 @@ class MainWindow(QMainWindow):
             self.old_panel.browser.find(text, flags)
             self.new_panel.browser.find(text, flags)
 
-    # ── Edit text mode ────────────────────────────────────────────────────────
-    def _toggle_edit_mode(self):
-        if self._old_doc is None or self._new_doc is None:
-            self._status.showMessage('Run a comparison first before editing text.')
-            return
-
-        self._edit_mode = not self._edit_mode
-
-        if self._edit_mode:
-            # Block signals while loading plain text so it doesn't fire auto-recompare
-            self.old_panel.browser.blockSignals(True)
-            self.new_panel.browser.blockSignals(True)
-            self.old_panel.set_editable(self._old_doc.plain_text())
-            self.new_panel.set_editable(self._new_doc.plain_text())
-            self.old_panel.browser.blockSignals(False)
-            self.new_panel.browser.blockSignals(False)
-            self.btn_edit_text.setText('✔ Done Editing')
-            self.btn_edit_text.setStyleSheet(
-                'QPushButton{background:#059669;color:#fff;border:none;'
-                'padding:6px 16px;border-radius:4px;font-weight:600;}'
-                'QPushButton:hover{background:#047857;}'
-            )
-            self._status.showMessage(
-                'Edit mode — click anywhere in either panel to edit. '
-                'Comparison updates automatically as you type.'
-            )
-        else:
-            self._recompare_timer.stop()
-            # Show the latest diff (auto-recompare keeps it up to date)
-            self.old_panel.set_html(self._old_diff_html)
-            self.new_panel.set_html(self._new_diff_html)
-            self.btn_edit_text.setText('✎ Edit Text')
-            self.btn_edit_text.setStyleSheet(
-                'QPushButton{background:#6366f1;color:#fff;border:none;'
-                'padding:6px 16px;border-radius:4px;font-weight:600;}'
-                'QPushButton:hover{background:#4f46e5;}'
-            )
-            self._status.showMessage('Compare view — showing latest comparison.')
-
-    def _schedule_recompare(self):
-        if self._edit_mode:
-            self._recompare_timer.start()
-            self._status.showMessage('Editing… comparison will update automatically.')
-
-    def _recompare_from_edited_text(self):
-        if not self._edit_mode:
-            return
-        old_text = self.old_panel.browser.toPlainText()
-        new_text = self.new_panel.browser.toPlainText()
-
-        self._old_doc = _text_to_doc(old_text)
-        self._new_doc = _text_to_doc(new_text)
-
-        self._status.showMessage('Auto-comparing…')
-        try:
-            self._old_diff_html, self._new_diff_html, sidebar_html = build_diff_html(
-                self._old_doc, self._new_doc
-            )
-        except Exception as e:
-            self._status.showMessage(f'Auto-compare error: {e}')
-            return
-
-        # Update sidebar for live change-count feedback while still editing.
-        # The HTML panels refresh when the user clicks "✔ Done Editing".
-        self.sidebar.setHtml(sidebar_html)
-        self._view_raw = False
-        self.btn_view.setText('PDF Page View')
-        self._status.showMessage(
-            'Comparison ready. Keep editing or click ✔ Done Editing to see the diff.'
-        )

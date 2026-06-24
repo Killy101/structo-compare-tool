@@ -282,23 +282,31 @@ def _sidebar_item(kind: str, label: str, old_txt: str, new_txt: str, cid: str) -
     )
 
 
-def _p(inner: str, anchor: str = "") -> str:
-    """Wrap *inner* in a paragraph; add a zero‑width‑space anchor if requested."""
+def _p(inner: str, anchor: str = "", indent: int = 0) -> str:
+    """Wrap *inner* in a paragraph; add a zero‑width‑space anchor if requested.
+
+    ``indent`` reproduces the source document's leading whitespace using
+    non‑breaking spaces so the side‑by‑side view keeps its layout. The
+    panels normalise these back to plain spaces when text is re‑extracted.
+    """
     a_tag = f'<a name="{anchor}">&#8203;</a>' if anchor else ""
-    return f'<p style="margin:3px 0;line-height:1.6">{a_tag}{inner}</p>\n'
+    pad = "&nbsp;" * indent if indent else ""
+    return f'<p style="margin:3px 0;line-height:1.6">{a_tag}{pad}{inner}</p>\n'
 
 
 # -----------------------------------------------------------------------
 # Main diff entry point (unchanged)
 # -----------------------------------------------------------------------
-def build_diff_html(old_doc: Document, new_doc: Document) -> Tuple[str, str, str]:
+def build_diff_html(old_doc: Document, new_doc: Document) -> Tuple[str, str, str, list]:
     """
     Two‑pass diff:
-        1️⃣  Block‑level alignment (paragraphs)
-        2️⃣  Word‑level diff inside the “replace” pairs
+        1.  Block‑level alignment (paragraphs)
+        2.  Word‑level diff inside the “replace” pairs
 
-    Returns a tuple ``(old_html, new_html, sidebar_html)`` suitable for
-    insertion into the UI panels.
+    Returns ``(old_html, new_html, sidebar_html, changes)`` suitable for
+    insertion into the UI panels.  ``changes`` is an ordered list of
+    ``{"id", "kind", "old", "new"}`` dicts used for change‑to‑change
+    navigation.
     """
     old_blocks = old_doc.blocks
     new_blocks = new_doc.blocks
@@ -314,6 +322,7 @@ def build_diff_html(old_doc: Document, new_doc: Document) -> Tuple[str, str, str
     old_parts: List[str] = []
     new_parts: List[str] = []
     sidebar_items: List[str] = []
+    changes: List[dict] = []
     change_num = 0
     stats = {"added": 0, "deleted": 0, "modified": 0}
 
@@ -321,30 +330,34 @@ def build_diff_html(old_doc: Document, new_doc: Document) -> Tuple[str, str, str
         if tag == "equal":
             for bi, bj in zip(range(i1, i2), range(j1, j2)):
                 ob, nb = old_blocks[bi], new_blocks[bj]
-                old_parts.append(_p(_render_plain(ob)))
-                new_parts.append(_p(_render_plain(nb)))
+                old_parts.append(_p(_render_plain(ob), indent=ob.indent))
+                new_parts.append(_p(_render_plain(nb), indent=nb.indent))
 
         elif tag == "delete":
             for b in old_blocks[i1:i2]:
                 txt = b.plain_text().strip()
                 if not txt:
+                    old_parts.append(_p(""))
                     continue
                 change_num += 1
                 cid = f"c{change_num}"
-                old_parts.append(_p(_render_highlighted(b, "#ffb3b3"), cid))
+                old_parts.append(_p(_render_highlighted(b, "#ffb3b3"), cid, b.indent))
                 stats["deleted"] += 1
                 sidebar_items.append(_sidebar_item("del", "Deleted", txt, "", cid))
+                changes.append({"id": cid, "kind": "del", "old": txt, "new": ""})
 
         elif tag == "insert":
             for b in new_blocks[j1:j2]:
                 txt = b.plain_text().strip()
                 if not txt:
+                    new_parts.append(_p(""))
                     continue
                 change_num += 1
                 cid = f"c{change_num}"
-                new_parts.append(_p(_render_highlighted(b, "#b3ffb3"), cid))
+                new_parts.append(_p(_render_highlighted(b, "#b3ffb3"), cid, b.indent))
                 stats["added"] += 1
                 sidebar_items.append(_sidebar_item("add", "Added", "", txt, cid))
+                changes.append({"id": cid, "kind": "add", "old": "", "new": txt})
 
         elif tag == "replace":
             # Align paragraphs by similarity, not by position.
@@ -360,17 +373,19 @@ def build_diff_html(old_doc: Document, new_doc: Document) -> Tuple[str, str, str
 
                     w_old, w_new, ctype = _word_diff_html(ob, nb)
                     if ctype == "equal":
-                        old_parts.append(_p(_render_plain(ob)))
-                        new_parts.append(_p(_render_plain(nb)))
+                        old_parts.append(_p(_render_plain(ob), indent=ob.indent))
+                        new_parts.append(_p(_render_plain(nb), indent=nb.indent))
                     else:
                         change_num += 1
                         cid = f"c{change_num}"
-                        old_parts.append(_p(w_old, cid))
-                        new_parts.append(_p(w_new, cid))
+                        old_parts.append(_p(w_old, cid, ob.indent))
+                        new_parts.append(_p(w_new, cid, nb.indent))
                         stats["modified"] += 1
                         sidebar_items.append(
                             _sidebar_item("mod", "Modified", old_txt, new_txt, cid)
                         )
+                        changes.append({"id": cid, "kind": "mod",
+                                        "old": old_txt, "new": new_txt})
 
                 elif op == "del":
                     txt = ob.plain_text().strip()
@@ -378,9 +393,10 @@ def build_diff_html(old_doc: Document, new_doc: Document) -> Tuple[str, str, str
                         continue
                     change_num += 1
                     cid = f"c{change_num}"
-                    old_parts.append(_p(_render_highlighted(ob, "#ffb3b3"), cid))
+                    old_parts.append(_p(_render_highlighted(ob, "#ffb3b3"), cid, ob.indent))
                     stats["deleted"] += 1
                     sidebar_items.append(_sidebar_item("del", "Deleted", txt, "", cid))
+                    changes.append({"id": cid, "kind": "del", "old": txt, "new": ""})
 
                 else:  # op == "add"
                     txt = nb.plain_text().strip()
@@ -388,12 +404,13 @@ def build_diff_html(old_doc: Document, new_doc: Document) -> Tuple[str, str, str
                         continue
                     change_num += 1
                     cid = f"c{change_num}"
-                    new_parts.append(_p(_render_highlighted(nb, "#b3ffb3"), cid))
+                    new_parts.append(_p(_render_highlighted(nb, "#b3ffb3"), cid, nb.indent))
                     stats["added"] += 1
                     sidebar_items.append(_sidebar_item("add", "Added", "", txt, cid))
+                    changes.append({"id": cid, "kind": "add", "old": "", "new": txt})
 
     sidebar_html = _build_sidebar(sidebar_items, stats)
-    return "".join(old_parts), "".join(new_parts), sidebar_html
+    return "".join(old_parts), "".join(new_parts), sidebar_html, changes
 
 
 # -----------------------------------------------------------------------

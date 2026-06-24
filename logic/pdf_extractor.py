@@ -1,21 +1,28 @@
 # logic/pdf_extractor.py
 """
-PDF → our internal ``Document`` model.
+PDF -> our internal ``Document`` model.
 
 *   Uses **PyMuPDF** (``fitz``) to pull text + basic styling.
 *   Detects **bold / italic** from both the PDF flags and the font name.
 *   Detects **underline / strikethrough** from:
-        –  PDF annotations (StrikeOut / Underline)
-        –  Link annotations (visual underline but encoded as a link)
-        –  Very thin drawing objects (lines / rectangles) that Word
+        -  PDF annotations (StrikeOut / Underline)
+        -  Link annotations (visual underline but encoded as a link)
+        -  Very thin drawing objects (lines / rectangles) that Word
            emits for those decorations.
-*   Normalises whitespace – the diff stage later collapses any remaining
-   “double‑space” noise, which eliminates a huge class of false positives.
+*   Reconstructs document **structure** -- one block per visual line,
+    indentation from x-position, blank blocks for paragraph / page gaps,
+    and a coarse ``kind`` (heading / list / normal) -- so the editable
+    panels mirror the original layout.
 """
 
+import re
 import fitz                               # pip install pymupdf
 from models.document import Document, TextBlock, TextSpan
 from typing import List
+
+# A leading list marker: bullet glyphs, "1." / "1)" / "a." / "iv." etc.
+_LIST_RE = re.compile(r'^\s*([•‣●▪◦⁃∙o\-\*]|'
+                      r'(\d+|[a-zA-Z]|[ivxlcdmIVXLCDM]+)[.)])\s+')
 
 
 def _check_line_overlap(
@@ -28,8 +35,8 @@ def _check_line_overlap(
     Return ``True`` if *any* thin horizontal drawing (line OR thin rectangle)
     intersects the span at the given vertical fraction.
 
-    ``mid_y_frac``  –  where inside the span we look (0 = top, 1 = bottom).  
-    ``tolerance_frac`` –  how far up/down we are willing to wander,
+    ``mid_y_frac``  --  where inside the span we look (0 = top, 1 = bottom).
+    ``tolerance_frac`` --  how far up/down we are willing to wander,
     expressed as a fraction of the span height.
     """
     span_h = span_rect.y1 - span_rect.y0
@@ -44,11 +51,11 @@ def _check_line_overlap(
             kind = item[0]
 
             # -------------------------------------------------------------
-            # Vector line – the usual PDF “draw line” object
+            # Vector line - the usual PDF "draw line" object
             # -------------------------------------------------------------
             if kind == "l":
                 p1, p2 = item[1], item[2]
-                # Discard non‑horizontal lines (angle > ~2 px)
+                # Discard non-horizontal lines (angle > ~2 px)
                 if abs(p1.y - p2.y) > 2:
                     continue
                 line_y = (p1.y + p2.y) / 2
@@ -58,11 +65,11 @@ def _check_line_overlap(
                     return True
 
             # -------------------------------------------------------------
-            # Filled rectangle – how Word encodes a thin rule.
+            # Filled rectangle - how Word encodes a thin rule.
             # -------------------------------------------------------------
             elif kind == "re":
                 rect = item[1]
-                # Anything taller than ~4 px is definitely not a rule.
+                # Anything taller than ~4 px is definitely not a rule.
                 if rect.height > 4:
                     continue
                 rect_mid_y = (rect.y0 + rect.y1) / 2
@@ -77,7 +84,7 @@ def extract_pdf(path: str) -> Document:
     """
     Turn a PDF file into a :class:`models.document.Document`.
 
-    The function is deliberately *pure* – it never creates Qt objects,
+    The function is deliberately *pure* - it never creates Qt objects,
     which means it is safe to run inside a ``QThread``.
     """
     doc = Document()
@@ -85,7 +92,7 @@ def extract_pdf(path: str) -> Document:
 
     for page in pdf:
         # -------------------------------------------------------------
-        # 1️⃣  Annotation‑based detection (StrikeOut / Underline)
+        # 1. Annotation-based detection (StrikeOut / Underline)
         # -------------------------------------------------------------
         strike_rects = [
             annot.rect
@@ -99,14 +106,14 @@ def extract_pdf(path: str) -> Document:
         ]
 
         # Hyperlink annotations are visually underlined but are stored
-        # as Link annotations – we treat them as “underline”.
+        # as Link annotations - we treat them as "underline".
         try:
             link_rects = [fitz.Rect(lk["from"]) for lk in page.get_links()]
         except Exception:
             link_rects = []
 
         # -------------------------------------------------------------
-        # 2️⃣  Drawing‑based detection (thin lines / rectangles)
+        # 2. Drawing-based detection (thin lines / rectangles)
         # -------------------------------------------------------------
         try:
             drawings = page.get_drawings()
@@ -114,21 +121,50 @@ def extract_pdf(path: str) -> Document:
             drawings = []
 
         # -------------------------------------------------------------
-        # 3️⃣  Extract the raw text + per‑span metadata
+        # 3. Extract the raw text + per-span metadata
         # -------------------------------------------------------------
         raw = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+
+        # Work out the page's left text margin and the dominant body font
+        # size so we can reconstruct indentation and detect headings.
+        x_starts: List[float] = []
+        sizes: List[float] = []
+        for rb in raw["blocks"]:
+            if rb.get("type") != 0:
+                continue
+            for ln in rb["lines"]:
+                for sp in ln["spans"]:
+                    if sp.get("text", "").strip():
+                        bb = sp.get("bbox")
+                        if bb:
+                            x_starts.append(bb[0])
+                        if sp.get("size"):
+                            sizes.append(round(sp["size"], 1))
+        page_left = min(x_starts) if x_starts else 0.0
+        body_size = max(set(sizes), key=sizes.count) if sizes else 11.0
+        # One indent "unit" ~ half an em of the body font.
+        unit = max(body_size * 0.5, 4.0)
+
+        # A blank block separates this page's content from the previous one.
+        if doc.blocks and not doc.blocks[-1].is_blank():
+            doc.blocks.append(TextBlock(kind='blank'))
+
+        prev_bottom = None
 
         for raw_block in raw["blocks"]:
             if raw_block.get("type") != 0:          # ignore images, etc.
                 continue
 
-            block = TextBlock()
-
             for line in raw_block["lines"]:
+                line_spans: List[TextSpan] = []
+                line_size = body_size
+
                 for span_data in line["spans"]:
                     # --------------------- styling flags -----------------
                     flags = span_data["flags"]
                     font_name = span_data.get("font", "").lower()
+                    if span_data.get("size"):
+                        line_size = span_data["size"]
 
                     bold = (
                         bool(flags & 16)
@@ -154,25 +190,25 @@ def extract_pdf(path: str) -> Document:
                             span_rect = None
 
                     # -------------------------------------------------
-                    # Underline / strike detection – draw‑based part
+                    # Underline / strike detection - draw-based part
                     # -------------------------------------------------
                     draw_underline = False
                     draw_strike = False
                     if span_rect is not None:
-                        # Underline zone – roughly the baseline (~85 % of span height)
+                        # Underline zone - roughly the baseline (~85% of span height)
                         draw_underline = _check_line_overlap(
                             span_rect, drawings, mid_y_frac=0.87, tolerance_frac=0.20
                         )
-                        # Strikethrough zone – middle of the glyphs (~45 % of span height)
+                        # Strikethrough zone - middle of the glyphs (~45% of span height)
                         draw_strike = _check_line_overlap(
                             span_rect, drawings, mid_y_frac=0.45, tolerance_frac=0.25
                         )
-                        # Overlap resolution – if both flags fire we prefer underline.
+                        # Overlap resolution - if both flags fire we prefer underline.
                         if draw_strike and draw_underline:
                             draw_strike = False
 
                     # -------------------------------------------------
-                    # Annotation‑based detection
+                    # Annotation-based detection
                     # -------------------------------------------------
                     strike = False
                     underline = False
@@ -189,7 +225,7 @@ def extract_pdf(path: str) -> Document:
 
                     text = span_data["text"]
                     if text:                               # keep empty spans out
-                        block.spans.append(
+                        line_spans.append(
                             TextSpan(
                                 text=text,
                                 bold=bold,
@@ -198,37 +234,68 @@ def extract_pdf(path: str) -> Document:
                                 underline=underline,
                             )
                         )
-                # Insert a *single* space between the original PDF lines.
-                # (PDF text extraction often leaves the line break out of the
-                # span list, so we add it manually.)
-                block.spans.append(TextSpan(text=" "))
 
-            # Discard empty blocks – they only contain whitespace.
-            if any(s.text.strip() for s in block.spans):
-                doc.blocks.append(block)
+                # Discard whitespace-only lines.
+                if not any(s.text.strip() for s in line_spans):
+                    continue
+
+                # ---- geometry of this visual line --------------------
+                lbbox = line.get("bbox")
+                lx0 = lbbox[0] if lbbox else page_left
+                ltop = lbbox[1] if lbbox else (prev_bottom or 0.0)
+                lbottom = lbbox[3] if lbbox else ltop
+
+                # Insert a blank block when there is a clear vertical gap -
+                # this preserves paragraph / section spacing.
+                if prev_bottom is not None and (ltop - prev_bottom) > line_size * 0.7:
+                    if doc.blocks and not doc.blocks[-1].is_blank():
+                        doc.blocks.append(TextBlock(kind='blank'))
+
+                indent = max(0, round((lx0 - page_left) / unit))
+
+                # ---- structural role ---------------------------------
+                line_text = ' '.join(s.text for s in line_spans).strip()
+                kind = 'normal'
+                if _LIST_RE.match(line_text):
+                    kind = 'list'
+                elif (line_size >= body_size * 1.15
+                      and all(s.bold for s in line_spans)
+                      and len(line_text) < 120):
+                    kind = 'heading'
+
+                doc.blocks.append(
+                    TextBlock(spans=line_spans, indent=indent, kind=kind)
+                )
+                prev_bottom = lbottom
+
+    # Trim a trailing blank block, if any.
+    while doc.blocks and doc.blocks[-1].is_blank():
+        doc.blocks.pop()
 
     pdf.close()
     return doc
 
 
-def render_pdf_preview(path: str, zoom: float = 1.4, max_pages: int = 60) -> str:
+def render_pdf_preview(path: str, zoom: float = 2.0, max_pages: int = 80) -> str:
     """
-    Render the first ``max_pages`` pages of *path* as PNG data‑URIs and wrap them
-    in a very small HTML fragment.  The fragment is used by the “PDF Page View”
-    toggle so the user can see the **real layout** of the source file.
+    Render the first ``max_pages`` pages of *path* as PNG data-URIs and wrap them
+    in a small HTML fragment.  Used by the "PDF Page View" toggle so the user can
+    see the **real layout** of the source file.  ``zoom`` is the render scale
+    (higher = sharper but heavier); the UI drives it via zoom controls.
     """
     import base64
     pdf = fitz.open(path)
 
     n_pages = min(len(pdf), max_pages)
-    # If the document is huge we back‑off the resolution to keep memory low.
-    if n_pages > 30:
-        zoom = min(zoom, 1.0)
+    # Clamp the render scale to keep memory in check on very long documents.
+    zoom = max(0.5, min(zoom, 4.0))
+    if n_pages > 40:
+        zoom = min(zoom, 1.6)
 
     mat = fitz.Matrix(zoom, zoom)
 
     parts = [
-        '<div style="background:#505050;padding:12px 16px;font-family:Arial,sans-serif;">'
+        '<div style="background:#525659;padding:14px 0;font-family:Arial,sans-serif;">'
     ]
     for i in range(n_pages):
         page = pdf[i]
@@ -236,14 +303,15 @@ def render_pdf_preview(path: str, zoom: float = 1.4, max_pages: int = 60) -> str
         b64 = base64.b64encode(pix.tobytes("png")).decode("ascii")
         parts.append(
             f'<div style="text-align:center;margin-bottom:18px;">'
-            f'<p style="color:#aaa;font-size:10px;margin:0 0 5px">Page {i+1} of {n_pages}</p>'
+            f'<p style="color:#cbd5e1;font-size:10px;margin:0 0 6px">Page {i+1} of {n_pages}</p>'
             f'<img src="data:image/png;base64,{b64}" '
-            f'style="max-width:100%;box-shadow:0 3px 10px rgba(0,0,0,0.55);border:1px solid #333;" />'
+            f'style="max-width:98%;background:#fff;'
+            f'box-shadow:0 3px 12px rgba(0,0,0,0.55);border:1px solid #1e293b;" />'
             f"</div>"
         )
     if len(pdf) > max_pages:
         parts.append(
-            f'<p style="color:#f9e2af;text-align:center;font-size:12px;">'
+            f'<p style="color:#fbbf24;text-align:center;font-size:12px;">'
             f'Showing first {max_pages} of {len(pdf)} pages.</p>'
         )
     pdf.close()
