@@ -116,3 +116,48 @@ def extract_pdf(path: str) -> Document:
 
     pdf.close()
     return doc
+
+
+def render_pdf_preview(path: str, zoom: float = 1.4, max_pages: int = 60) -> str:
+    """
+    Render each PDF page to a PNG image and return an HTML string with the
+    images embedded as data-URIs.  Used by the 'PDF Page View' toggle so
+    users see the true page layout rather than extracted text.
+
+    zoom=1.4 gives ~96 dpi equivalent for a letter/A4 page — sharp enough
+    to read but small enough that QTextBrowser handles it without lag.
+    Reduces to 1.0 automatically for documents with more than 30 pages.
+    """
+    import base64
+    pdf = fitz.open(path)
+    n = min(len(pdf), max_pages)
+    # Drop resolution a bit for long documents to avoid memory pressure
+    if n > 30:
+        zoom = min(zoom, 1.0)
+    mat = fitz.Matrix(zoom, zoom)
+
+    parts = [
+        '<div style="background:#505050;padding:12px 16px;'
+        'font-family:Arial,sans-serif;">'
+    ]
+    for i in range(n):
+        page = pdf[i]
+        pix  = page.get_pixmap(matrix=mat, alpha=False)
+        b64  = base64.b64encode(pix.tobytes('png')).decode('ascii')
+        parts.append(
+            f'<div style="text-align:center;margin-bottom:18px;">'
+            f'<p style="color:#aaa;font-size:10px;margin:0 0 5px">Page {i + 1} of {n}</p>'
+            f'<img src="data:image/png;base64,{b64}" '
+            f'style="max-width:100%;'
+            f'box-shadow:0 3px 10px rgba(0,0,0,0.55);'
+            f'border:1px solid #333;" />'
+            f'</div>'
+        )
+    if len(pdf) > max_pages:
+        parts.append(
+            f'<p style="color:#f9e2af;text-align:center;font-size:12px;">'
+            f'Showing first {max_pages} of {len(pdf)} pages.</p>'
+        )
+    pdf.close()
+    parts.append('</div>')
+    return ''.join(parts)
