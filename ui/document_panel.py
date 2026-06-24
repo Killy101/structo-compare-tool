@@ -43,7 +43,7 @@ _PLACEHOLDER = _CSS + """
 
 _STYLE_VIEW = 'background:#ffffff;border:none;'
 _STYLE_EDIT = (
-    'QTextEdit{background:#1e1e2e;color:#cdd6f4;border:none;'
+    'QTextEdit{background:#f8fafc;color:#1e293b;border:none;'
     'font-family:"Consolas","Courier New",monospace;font-size:12px;'
     'line-height:1.6;padding:10px;}'
 )

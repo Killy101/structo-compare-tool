@@ -72,7 +72,7 @@ class _CodeEdit(QPlainTextEdit):
 
     def _paint_line_numbers(self, event):
         painter = QPainter(self._line_area)
-        painter.fillRect(event.rect(), QColor('#161616'))
+        painter.fillRect(event.rect(), QColor('#f1f5f9'))
         painter.setFont(self.font())
 
         block = self.firstVisibleBlock()
@@ -88,7 +88,7 @@ class _CodeEdit(QPlainTextEdit):
         while block.isValid() and top <= event.rect().bottom():
             if block.isVisible() and bottom >= event.rect().top():
                 has_err = num in self._err_lines
-                painter.setPen(QColor('#e06c75') if has_err else QColor('#5a5a6a'))
+                painter.setPen(QColor('#dc2626') if has_err else QColor('#94a3b8'))
                 painter.drawText(
                     QRect(0, top, w - 5, fh),
                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
@@ -108,7 +108,7 @@ class _CodeEdit(QPlainTextEdit):
         # Current line — subtle highlight
         if not self.isReadOnly():
             sel = QTextEdit.ExtraSelection()
-            sel.format.setBackground(QColor('#252535'))
+            sel.format.setBackground(QColor('#f1f5f9'))
             sel.format.setProperty(0x100000 + 1, True)   # FullWidthSelection
             sel.cursor = self.textCursor()
             sel.cursor.clearSelection()
@@ -119,7 +119,7 @@ class _CodeEdit(QPlainTextEdit):
             block = self.document().findBlockByLineNumber(line_num)
             if block.isValid():
                 sel = QTextEdit.ExtraSelection()
-                sel.format.setBackground(QColor('#3d1515'))
+                sel.format.setBackground(QColor('#fee2e2'))
                 sel.format.setProperty(0x100000 + 1, True)
                 c = QTextCursor(block)
                 sel.cursor = c
@@ -169,14 +169,14 @@ class _XmlHighlighter(QSyntaxHighlighter):
             return f
 
         self._rules = [
-            (QRegularExpression(r'</?[\w:]+'),        fmt('#569cd6', bold=True)),
-            (QRegularExpression(r'/?>'),               fmt('#569cd6', bold=True)),
-            (QRegularExpression(r'\b[\w:]+(?=\s*=)'), fmt('#9cdcfe')),
-            (QRegularExpression(r'"[^"]*"'),           fmt('#ce9178')),
-            (QRegularExpression(r"'[^']*'"),           fmt('#ce9178')),
-            (QRegularExpression(r'<!--.*?-->'),        fmt('#6a9955', italic=True)),
-            (QRegularExpression(r'<!\[CDATA\[.*?\]\]>'), fmt('#d4d4aa')),
-            (QRegularExpression(r'<\?.*?\?>'),         fmt('#c586c0')),
+            (QRegularExpression(r'</?[\w:]+'),        fmt('#0451a5', bold=True)),
+            (QRegularExpression(r'/?>'),               fmt('#0451a5', bold=True)),
+            (QRegularExpression(r'\b[\w:]+(?=\s*=)'), fmt('#e50000')),
+            (QRegularExpression(r'"[^"]*"'),           fmt('#a31515')),
+            (QRegularExpression(r"'[^']*'"),           fmt('#a31515')),
+            (QRegularExpression(r'<!--.*?-->'),        fmt('#008000', italic=True)),
+            (QRegularExpression(r'<!\[CDATA\[.*?\]\]>'), fmt('#0451a5')),
+            (QRegularExpression(r'<\?.*?\?>'),         fmt('#af00db')),
         ]
 
     def highlightBlock(self, text: str):
@@ -211,10 +211,10 @@ class _ValidationBar(QWidget):
 
     def _set_state(self, state: str, text: str = ''):
         colors = {
-            'idle':  ('#858585', '#1e1e2e'),
-            'ok':    ('#4ec94e', '#1a321a'),
-            'error': ('#f48771', '#321a1a'),
-            'empty': ('#858585', '#1e1e2e'),
+            'idle':  ('#94a3b8', '#f8fafc'),
+            'ok':    ('#059669', '#f0fdf4'),
+            'error': ('#dc2626', '#fef2f2'),
+            'empty': ('#94a3b8', '#f8fafc'),
         }
         fg, bg = colors.get(state, ('#858585', '#1e1e2e'))
         icons  = {'idle': '—', 'ok': '✓', 'error': '✕', 'empty': '—'}
@@ -491,7 +491,7 @@ class XmlEditor(QWidget):
 
         # ── Toolbar ──────────────────────────────────────────────────────────
         toolbar = QWidget()
-        toolbar.setStyleSheet('background:#252526;border-bottom:1px solid #3e3e3e;')
+        toolbar.setStyleSheet('background:#f8fafc;border-bottom:1px solid #e2e8f0;')
         tb = QHBoxLayout(toolbar)
         tb.setContentsMargins(6, 3, 6, 3)
         tb.setSpacing(4)
@@ -500,9 +500,9 @@ class XmlEditor(QWidget):
             b = QPushButton(label)
             b.setToolTip(tip)
             b.setStyleSheet(
-                'QPushButton{background:#3e3e3e;color:#ccc;border:none;'
+                'QPushButton{background:#f1f5f9;color:#475569;border:1px solid #e2e8f0;'
                 'padding:3px 10px;border-radius:3px;font-size:11px;}'
-                'QPushButton:hover{background:#505050;}'
+                'QPushButton:hover{background:#e2e8f0;color:#334155;}'
             )
             return b
 
@@ -528,7 +528,7 @@ class XmlEditor(QWidget):
         mono.setStyleHint(QFont.StyleHint.Monospace)
         self._edit.setFont(mono)
         self._edit.setStyleSheet(
-            'background:#1e1e1e;color:#d4d4d4;border:none;padding:8px;'
+            'background:#ffffff;color:#1e293b;border:none;padding:8px;'
         )
         self._edit.setPlaceholderText('Open an XML file to edit…')
         self._edit.setTabStopDistance(28)
