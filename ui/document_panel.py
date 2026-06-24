@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QTextBrowser, QTextEdit
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QTextEdit
 from PySide6.QtGui import QTextCursor, QColor
 from PySide6.QtCore import Qt, QTimer
 
@@ -41,6 +41,13 @@ _PLACEHOLDER = _CSS + """
 </body>
 """
 
+_STYLE_VIEW = 'background:#ffffff;border:none;'
+_STYLE_EDIT = (
+    'QTextEdit{background:#1e1e2e;color:#cdd6f4;border:none;'
+    'font-family:"Consolas","Courier New",monospace;font-size:12px;'
+    'line-height:1.6;padding:10px;}'
+)
+
 
 class DocumentPanel(QWidget):
     def __init__(self, parent=None):
@@ -49,23 +56,28 @@ class DocumentPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        self.browser = QTextBrowser()
-        self.browser.setStyleSheet('background:#ffffff;border:none;')
-        self.browser.setOpenLinks(False)
+        self.browser = QTextEdit()
+        self.browser.setReadOnly(True)
+        self.browser.setStyleSheet(_STYLE_VIEW)
         self.browser.setHtml(_PLACEHOLDER)
         layout.addWidget(self.browser)
 
     def set_html(self, content: str):
+        self.browser.setReadOnly(True)
+        self.browser.setStyleSheet(_STYLE_VIEW)
         self.browser.setHtml(
             f'<html><head>{_CSS}</head><body>{content}</body></html>'
         )
 
+    def set_editable(self, text: str):
+        """Switch panel to plain-text editing mode — user can click anywhere and type."""
+        self.browser.setReadOnly(False)
+        self.browser.setStyleSheet(_STYLE_EDIT)
+        self.browser.setPlainText(text)
+
     def scroll_to_anchor(self, anchor: str):
         if not anchor:
             return
-        # Move the cursor to the named anchor so the view scrolls reliably,
-        # then flash the surrounding line so the user sees where it landed.
-        self.browser.scrollToAnchor(anchor)
         cursor = self._cursor_at_anchor(anchor)
         if cursor is not None:
             self.browser.setTextCursor(cursor)
@@ -85,9 +97,6 @@ class DocumentPanel(QWidget):
             it = block.begin()
             while not it.atEnd():
                 frag = it.fragment()
-                # frag.isValid() requires length > 0; our &#8203; anchor
-                # satisfies that.  Check anchorNames regardless of length
-                # so we degrade gracefully for any legacy empty anchors.
                 fmt = frag.charFormat()
                 if fmt.isAnchor():
                     names = fmt.anchorNames()
@@ -110,6 +119,8 @@ class DocumentPanel(QWidget):
         QTimer.singleShot(1300, lambda: self.browser.setExtraSelections([]))
 
     def clear(self):
+        self.browser.setReadOnly(True)
+        self.browser.setStyleSheet(_STYLE_VIEW)
         self.browser.setHtml(_PLACEHOLDER)
 
     def scroll_fraction(self) -> float:

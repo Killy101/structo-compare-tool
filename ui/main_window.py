@@ -5,7 +5,6 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget,
     QSplitter, QPushButton, QFileDialog, QStatusBar,
     QLabel, QTextBrowser, QProgressBar, QCheckBox, QFrame, QLineEdit,
-    QPlainTextEdit,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut, QTextDocument
@@ -528,12 +527,6 @@ class MainWindow(QMainWindow):
         sb_lay.addWidget(btn_close_search)
         root.addWidget(search_bar)
 
-        _edit_ss = (
-            'QPlainTextEdit{background:#1e1e2e;color:#cdd6f4;'
-            'font-family:"Consolas","Courier New",monospace;font-size:12px;'
-            'line-height:1.6;border:none;padding:10px;}'
-        )
-
         # ── Old PDF panel ─────────────────────────────────────────────────────
         old_wrap = QWidget()
         ow = QVBoxLayout(old_wrap)
@@ -541,13 +534,7 @@ class MainWindow(QMainWindow):
         ow.setSpacing(0)
         ow.addWidget(_panel_header('Old  (PDF)'))
         self.old_panel = DocumentPanel()
-        self._old_edit = QPlainTextEdit()
-        self._old_edit.setStyleSheet(_edit_ss)
-        self._old_edit.setPlaceholderText('Extracted text from Old PDF will appear here for editing…')
-        self._old_stack = QStackedWidget()
-        self._old_stack.addWidget(self.old_panel)   # index 0 — compare/view
-        self._old_stack.addWidget(self._old_edit)   # index 1 — edit mode
-        ow.addWidget(self._old_stack)
+        ow.addWidget(self.old_panel)
 
         # ── New PDF panel ─────────────────────────────────────────────────────
         new_wrap = QWidget()
@@ -556,13 +543,7 @@ class MainWindow(QMainWindow):
         nw.setSpacing(0)
         nw.addWidget(_panel_header('New  (PDF)'))
         self.new_panel = DocumentPanel()
-        self._new_edit = QPlainTextEdit()
-        self._new_edit.setStyleSheet(_edit_ss)
-        self._new_edit.setPlaceholderText('Extracted text from New PDF will appear here for editing…')
-        self._new_stack = QStackedWidget()
-        self._new_stack.addWidget(self.new_panel)   # index 0 — compare/view
-        self._new_stack.addWidget(self._new_edit)   # index 1 — edit mode
-        nw.addWidget(self._new_stack)
+        nw.addWidget(self.new_panel)
 
         # ── PDF row ───────────────────────────────────────────────────────────
         pdf_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -703,13 +684,13 @@ class MainWindow(QMainWindow):
         self.btn_edit_text.clicked.connect(self._toggle_edit_mode)
         QShortcut(QKeySequence('Ctrl+S'), self).activated.connect(self._save_xml)
 
-        # Auto-recompare: fires 800 ms after the user stops typing in either editor
+        # Auto-recompare: fires 800 ms after the user stops typing in either panel
         self._recompare_timer = QTimer()
         self._recompare_timer.setSingleShot(True)
         self._recompare_timer.setInterval(800)
         self._recompare_timer.timeout.connect(self._recompare_from_edited_text)
-        self._old_edit.textChanged.connect(self._schedule_recompare)
-        self._new_edit.textChanged.connect(self._schedule_recompare)
+        self.old_panel.browser.textChanged.connect(self._schedule_recompare)
+        self.new_panel.browser.textChanged.connect(self._schedule_recompare)
         QShortcut(QKeySequence('Ctrl+F'), self).activated.connect(self._open_search)
         QShortcut(QKeySequence('Escape'), self._search_bar).activated.connect(self._close_search)
 
@@ -725,6 +706,10 @@ class MainWindow(QMainWindow):
 
     # ── Upload / compare flow ─────────────────────────────────────────────────
     def _go_to_upload(self):
+        if self._edit_mode:
+            self._edit_mode = False
+            self._recompare_timer.stop()
+            self.btn_edit_text.setText('✎ Edit Text')
         self._stack.setCurrentIndex(0)
         self._status.showMessage('Select files to begin a new comparison.')
 
@@ -786,6 +771,9 @@ class MainWindow(QMainWindow):
     # ── View mode toggle ──────────────────────────────────────────────────────
     def _toggle_view(self):
         if self._old_doc is None:
+            return
+        if self._edit_mode:
+            self._status.showMessage('Exit edit mode first (click ✔ Done Editing).')
             return
         self._view_raw = not self._view_raw
         if self._view_raw:
@@ -1064,25 +1052,25 @@ class MainWindow(QMainWindow):
         self._edit_mode = not self._edit_mode
 
         if self._edit_mode:
-            # Block signals while populating so setPlainText doesn't trigger auto-recompare
-            self._old_edit.blockSignals(True)
-            self._new_edit.blockSignals(True)
-            self._old_edit.setPlainText(self._old_doc.plain_text())
-            self._new_edit.setPlainText(self._new_doc.plain_text())
-            self._old_edit.blockSignals(False)
-            self._new_edit.blockSignals(False)
-            self._old_stack.setCurrentIndex(1)
-            self._new_stack.setCurrentIndex(1)
-            self.btn_edit_text.setText('✎ Cancel Edit')
+            # Block signals while loading plain text so it doesn't fire auto-recompare
+            self.old_panel.browser.blockSignals(True)
+            self.new_panel.browser.blockSignals(True)
+            self.old_panel.set_editable(self._old_doc.plain_text())
+            self.new_panel.set_editable(self._new_doc.plain_text())
+            self.old_panel.browser.blockSignals(False)
+            self.new_panel.browser.blockSignals(False)
+            self.btn_edit_text.setText('✔ Done Editing')
             self._status.showMessage(
-                'Edit mode — type in either panel; comparison updates automatically.'
+                'Edit mode — click anywhere in either panel to edit. '
+                'Comparison updates automatically as you type.'
             )
         else:
             self._recompare_timer.stop()
-            self._old_stack.setCurrentIndex(0)
-            self._new_stack.setCurrentIndex(0)
+            # Show the latest diff (auto-recompare keeps it up to date)
+            self.old_panel.set_html(self._old_diff_html)
+            self.new_panel.set_html(self._new_diff_html)
             self.btn_edit_text.setText('✎ Edit Text')
-            self._status.showMessage('Edit cancelled — comparison view restored.')
+            self._status.showMessage('Compare view — showing latest comparison.')
 
     def _schedule_recompare(self):
         if self._edit_mode:
@@ -1092,8 +1080,8 @@ class MainWindow(QMainWindow):
     def _recompare_from_edited_text(self):
         if not self._edit_mode:
             return
-        old_text = self._old_edit.toPlainText()
-        new_text = self._new_edit.toPlainText()
+        old_text = self.old_panel.browser.toPlainText()
+        new_text = self.new_panel.browser.toPlainText()
 
         self._old_doc = _text_to_doc(old_text)
         self._new_doc = _text_to_doc(new_text)
@@ -1107,13 +1095,11 @@ class MainWindow(QMainWindow):
             self._status.showMessage(f'Auto-compare error: {e}')
             return
 
-        # Update the compare view in the background (panels are on stack index 0,
-        # hidden behind the editors while still in edit mode)
-        self.old_panel.set_html(self._old_diff_html)
-        self.new_panel.set_html(self._new_diff_html)
+        # Update sidebar for live change-count feedback while still editing.
+        # The HTML panels refresh when the user clicks "✔ Done Editing".
         self.sidebar.setHtml(sidebar_html)
         self._view_raw = False
         self.btn_view.setText('PDF Page View')
         self._status.showMessage(
-            'Comparison updated. Keep editing or click ✎ Cancel Edit to exit.'
+            'Comparison ready. Keep editing or click ✔ Done Editing to see the diff.'
         )
