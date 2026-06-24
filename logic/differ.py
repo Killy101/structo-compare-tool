@@ -71,10 +71,10 @@ def _align_replace(old_slice: List[TextBlock],
     return ops
 
 # ── Highlight palette ────────────────────────────────────────────────────────
-BG_DELETE   = '#ffb3b3'   # pink-red  — deleted text
-BG_INSERT   = '#b3ffb3'   # green     — added text
-BG_MOD_OLD  = '#ffd6d6'   # light pink — old side of a modification
-BG_MOD_NEW  = '#ffffa0'   # yellow    — new side of a modification
+BG_DELETE   = '#ffb3b3'   # pink-red  — deleted text / modified-old words
+BG_INSERT   = '#b3ffb3'   # green     — added text / modified-new words
+BG_MOD_OLD  = '#ffb3b3'   # red/pink  — old side of a modification (matches delete)
+BG_MOD_NEW  = '#b3ffb3'   # green     — new side of a modification (matches insert)
 
 
 # ── Token: one word with its source formatting ───────────────────────────────
@@ -194,7 +194,7 @@ def _word_diff_html(old_block: TextBlock, new_block: TextBlock) -> Tuple[str, st
         elif tag == 'delete':
             has_content_change = True
             for tok in old_tok[i1:i2]:
-                old_parts.append(tok.render(bg=BG_DELETE, diff_strike=True) + ' ')
+                old_parts.append(tok.render(bg=BG_DELETE) + ' ')
 
         elif tag == 'insert':
             has_content_change = True
@@ -204,7 +204,7 @@ def _word_diff_html(old_block: TextBlock, new_block: TextBlock) -> Tuple[str, st
         elif tag == 'replace':
             has_content_change = True
             for tok in old_tok[i1:i2]:
-                old_parts.append(tok.render(bg=BG_MOD_OLD, diff_strike=True) + ' ')
+                old_parts.append(tok.render(bg=BG_MOD_OLD) + ' ')
             for tok in new_tok[j1:j2]:
                 new_parts.append(tok.render(bg=BG_MOD_NEW) + ' ')
 
@@ -309,7 +309,7 @@ def build_diff_html(old_doc: Document, new_doc: Document) -> Tuple[str, str, str
                     continue
                 change_num += 1
                 cid = f'c{change_num}'
-                old_parts.append(_p(_render_highlighted(b, BG_DELETE, diff_strike=True), cid))
+                old_parts.append(_p(_render_highlighted(b, BG_DELETE), cid))
                 stats['deleted'] += 1
                 sidebar_items.append(_sidebar_item('del', 'Deleted', txt, '', cid))
 
@@ -353,7 +353,7 @@ def build_diff_html(old_doc: Document, new_doc: Document) -> Tuple[str, str, str
                         continue
                     change_num += 1
                     cid = f'c{change_num}'
-                    old_parts.append(_p(_render_highlighted(ob, BG_DELETE, diff_strike=True), cid))
+                    old_parts.append(_p(_render_highlighted(ob, BG_DELETE), cid))
                     stats['deleted'] += 1
                     sidebar_items.append(_sidebar_item('del', 'Deleted', txt, '', cid))
 
