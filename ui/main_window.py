@@ -73,9 +73,9 @@ def _btn(label: str, color: str, hover: str, min_w: int = 0) -> QPushButton:
     b = QPushButton(label)
     style = (
         f'QPushButton{{background:{color};color:#fff;border:none;'
-        f'padding:6px 16px;border-radius:4px;font-weight:bold;}}'
+        f'padding:6px 16px;border-radius:4px;font-weight:600;}}'
         f'QPushButton:hover{{background:{hover};}}'
-        f'QPushButton:disabled{{background:#555;color:#999;}}'
+        f'QPushButton:disabled{{background:#e2e8f0;color:#94a3b8;}}'
     )
     b.setStyleSheet(style)
     if min_w:
@@ -87,8 +87,9 @@ def _panel_header(text: str) -> QLabel:
     lbl = QLabel(text)
     lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
     lbl.setStyleSheet(
-        'background:#2b2d42;color:#edf2f4;padding:6px;'
+        'background:#f1f5f9;color:#334155;padding:7px;'
         'font-weight:bold;font-size:12px;letter-spacing:0.5px;'
+        'border-bottom:1px solid #e2e8f0;'
     )
     return lbl
 
@@ -98,6 +99,7 @@ def _legend_chip(color: str, text: str) -> QLabel:
     lbl.setStyleSheet(
         f'background:{color};padding:2px 10px;border-radius:3px;'
         'font-size:11px;border:1px solid rgba(0,0,0,0.15);'
+        'color:#1e293b;font-weight:500;'
     )
     return lbl
 
@@ -105,7 +107,7 @@ def _legend_chip(color: str, text: str) -> QLabel:
 def _sep() -> QFrame:
     f = QFrame()
     f.setFrameShape(QFrame.Shape.VLine)
-    f.setStyleSheet('color:#3a3a4a;')
+    f.setStyleSheet('color:#e2e8f0;')
     return f
 
 
@@ -115,7 +117,7 @@ def _sep() -> QFrame:
 class _UploadPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setStyleSheet('background:#12122a;')
+        self.setStyleSheet('background:#f0f4f8;')
 
         outer = QVBoxLayout(self)
         outer.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -123,7 +125,7 @@ class _UploadPage(QWidget):
         card = QWidget()
         card.setFixedWidth(560)
         card.setStyleSheet(
-            'background:#1e1e38;border-radius:12px;'
+            'background:#ffffff;border-radius:12px;border:1px solid #e2e8f0;'
         )
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(40, 36, 40, 36)
@@ -133,26 +135,26 @@ class _UploadPage(QWidget):
         title = QLabel('Structo Compare')
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet(
-            'color:#edf2f4;font-size:26px;font-weight:bold;'
+            'color:#1e293b;font-size:26px;font-weight:bold;'
             'letter-spacing:1px;background:transparent;'
         )
         subtitle = QLabel('Document Comparison Tool')
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        subtitle.setStyleSheet('color:#8890aa;font-size:13px;background:transparent;')
+        subtitle.setStyleSheet('color:#64748b;font-size:13px;background:transparent;')
         card_layout.addWidget(title)
         card_layout.addWidget(subtitle)
 
         # Divider
         div = QFrame()
         div.setFrameShape(QFrame.Shape.HLine)
-        div.setStyleSheet('color:#2e2e50;')
+        div.setStyleSheet('color:#e2e8f0;')
         card_layout.addWidget(div)
 
         # Drop-zone style row helper
         def file_row(icon: str, label: str, optional: bool = False):
             row = QFrame()
             row.setStyleSheet(
-                'QFrame{background:#16162e;border:1px dashed #3a3a5a;'
+                'QFrame{background:#f8fafc;border:1px dashed #cbd5e1;'
                 'border-radius:8px;}'
             )
             rl = QHBoxLayout(row)
@@ -161,7 +163,7 @@ class _UploadPage(QWidget):
 
             lbl = QLabel(f'{icon}  {label}')
             lbl.setStyleSheet(
-                'color:#cdd6f4;font-size:13px;font-weight:bold;'
+                'color:#334155;font-size:13px;font-weight:bold;'
                 'background:transparent;border:none;'
             )
             lbl.setFixedWidth(120)
@@ -170,16 +172,16 @@ class _UploadPage(QWidget):
             info_wrap.setSpacing(1)
             fname = QLabel('Drop file here  ·  or browse')
             fname.setStyleSheet(
-                'color:#6272a4;font-size:12px;background:transparent;border:none;'
+                'color:#94a3b8;font-size:12px;background:transparent;border:none;'
             )
             status = QLabel('optional' if optional else '')
             status.setStyleSheet(
-                'color:#6272a4;font-size:10px;background:transparent;border:none;'
+                'color:#94a3b8;font-size:10px;background:transparent;border:none;'
             )
             info_wrap.addWidget(fname)
             info_wrap.addWidget(status)
 
-            browse = _btn('Browse…', '#3a3a6a', '#4a4a8a')
+            browse = _btn('Browse…', '#6366f1', '#4f46e5')
             browse.setFixedWidth(90)
 
             rl.addWidget(lbl)
@@ -198,7 +200,7 @@ class _UploadPage(QWidget):
         self.setAcceptDrops(True)
 
         # Compare button
-        self.btn_compare = _btn('⟳  Compare', '#2a9d8f', '#21867a', min_w=160)
+        self.btn_compare = _btn('⟳  Compare', '#0ea5e9', '#0284c7', min_w=160)
         self.btn_compare.setFixedHeight(40)
         self.btn_compare.setEnabled(False)
         cmp_wrap = QHBoxLayout()
@@ -208,7 +210,7 @@ class _UploadPage(QWidget):
 
         self._hint = QLabel('Select Old PDF and New PDF to enable comparison.')
         self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._hint.setStyleSheet('color:#585b70;font-size:11px;background:transparent;')
+        self._hint.setStyleSheet('color:#94a3b8;font-size:11px;background:transparent;')
         card_layout.addWidget(self._hint)
 
         outer.addWidget(card)
@@ -275,15 +277,15 @@ class _UploadPage(QWidget):
         if ok:
             setattr(self, f'{kind}_path', path)
             lbl.setText(f'{os.path.basename(path)}  ·  {self._human_size(path)}')
-            lbl.setStyleSheet('color:#cdd6f4;font-size:12px;background:transparent;border:none;')
+            lbl.setStyleSheet('color:#334155;font-size:12px;background:transparent;border:none;')
             status.setText(msg)
-            status.setStyleSheet('color:#a6e3a1;font-size:10px;background:transparent;border:none;')
+            status.setStyleSheet('color:#059669;font-size:10px;background:transparent;border:none;')
         else:
             setattr(self, f'{kind}_path', '')
             lbl.setText(os.path.basename(path))
-            lbl.setStyleSheet('color:#cdd6f4;font-size:12px;background:transparent;border:none;')
+            lbl.setStyleSheet('color:#334155;font-size:12px;background:transparent;border:none;')
             status.setText(msg)
-            status.setStyleSheet('color:#f38ba8;font-size:10px;background:transparent;border:none;')
+            status.setStyleSheet('color:#dc2626;font-size:10px;background:transparent;border:none;')
 
         self._update_compare()
 
@@ -318,14 +320,14 @@ class _UploadPage(QWidget):
 class _ProcessingPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setStyleSheet('background:#12122a;')
+        self.setStyleSheet('background:#f0f4f8;')
 
         outer = QVBoxLayout(self)
         outer.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         card = QWidget()
         card.setFixedWidth(480)
-        card.setStyleSheet('background:#1e1e38;border-radius:12px;')
+        card.setStyleSheet('background:#ffffff;border-radius:12px;border:1px solid #e2e8f0;')
         cl = QVBoxLayout(card)
         cl.setContentsMargins(40, 40, 40, 40)
         cl.setSpacing(18)
@@ -333,13 +335,13 @@ class _ProcessingPage(QWidget):
         title = QLabel('Processing Comparison…')
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet(
-            'color:#edf2f4;font-size:20px;font-weight:bold;background:transparent;'
+            'color:#1e293b;font-size:20px;font-weight:bold;background:transparent;'
         )
         cl.addWidget(title)
 
         self._status = QLabel('Initialising…')
         self._status.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._status.setStyleSheet('color:#a6adc8;font-size:13px;background:transparent;')
+        self._status.setStyleSheet('color:#64748b;font-size:13px;background:transparent;')
         cl.addWidget(self._status)
 
         self._bar = QProgressBar()
@@ -347,8 +349,8 @@ class _ProcessingPage(QWidget):
         self._bar.setTextVisible(False)
         self._bar.setFixedHeight(8)
         self._bar.setStyleSheet(
-            'QProgressBar{background:#2b2d42;border-radius:4px;border:none;}'
-            'QProgressBar::chunk{background:#2a9d8f;border-radius:4px;}'
+            'QProgressBar{background:#e2e8f0;border-radius:4px;border:none;}'
+            'QProgressBar::chunk{background:#0ea5e9;border-radius:4px;}'
         )
         cl.addWidget(self._bar)
 
@@ -409,7 +411,7 @@ class MainWindow(QMainWindow):
 
         # ── Toolbar ──────────────────────────────────────────────────────────
         toolbar = QWidget()
-        toolbar.setStyleSheet('background:#1a1a2e;')
+        toolbar.setStyleSheet('background:#ffffff;border-bottom:2px solid #e2e8f0;')
         toolbar.setFixedHeight(52)
         tb = QHBoxLayout(toolbar)
         tb.setContentsMargins(12, 0, 12, 0)
@@ -417,20 +419,20 @@ class MainWindow(QMainWindow):
 
         logo = QLabel('Structo Compare')
         logo.setStyleSheet(
-            'color:#edf2f4;font-size:17px;font-weight:bold;letter-spacing:1px;'
+            'color:#1e293b;font-size:17px;font-weight:bold;letter-spacing:1px;'
         )
 
-        self.btn_back    = _btn('← New Files',    '#3a3a6a', '#4a4a8a')
-        self.btn_view    = _btn('PDF Page View',  '#6c757d', '#5a6268')
-        self.btn_export  = _btn('Export HTML',    '#2a7de1', '#1a6dd0')
-        self.btn_save    = _btn('Save XML As…',   '#e76f51', '#d4623d')
+        self.btn_back    = _btn('← New Files',   '#64748b', '#475569')
+        self.btn_view    = _btn('PDF Page View',  '#64748b', '#475569')
+        self.btn_export  = _btn('Export HTML',    '#2563eb', '#1d4ed8')
+        self.btn_save    = _btn('Save XML As…',   '#dc2626', '#b91c1c')
 
         # Panel-visibility toggles (always in toolbar for quick access)
         _tgl_ss = (
-            'QPushButton{background:#2e2e50;color:#a6adc8;border:1px solid #3a3a6a;'
+            'QPushButton{background:#f1f5f9;color:#475569;border:1px solid #e2e8f0;'
             'border-radius:4px;padding:4px 10px;font-size:11px;}'
-            'QPushButton:hover{background:#3a3a6a;color:#cdd6f4;}'
-            'QPushButton:checked{background:#3a3a6a;color:#cdd6f4;}'
+            'QPushButton:hover{background:#e2e8f0;color:#334155;}'
+            'QPushButton:checked{background:#ede9fe;color:#5b21b6;border-color:#c4b5fd;}'
         )
         self._btn_sidebar_tb = QPushButton('Changes ◀')
         self._btn_sidebar_tb.setStyleSheet(_tgl_ss)
@@ -443,19 +445,19 @@ class MainWindow(QMainWindow):
         self._btn_xml_tb.setChecked(False)
 
         # Edit-text mode
-        self.btn_edit_text = _btn('✎ Edit Text', '#6c757d', '#5a6268')
+        self.btn_edit_text = _btn('✎ Edit Text', '#6366f1', '#4f46e5')
 
         self._sync_cb = QCheckBox('Sync Scroll')
         self._sync_cb.setStyleSheet(
-            'QCheckBox{color:#cdd6f4;font-size:12px;spacing:5px;}'
+            'QCheckBox{color:#475569;font-size:12px;spacing:5px;}'
             'QCheckBox::indicator{width:14px;height:14px;}'
-            'QCheckBox::indicator:unchecked{background:#3a3a5a;border:1px solid #556;border-radius:3px;}'
-            'QCheckBox::indicator:checked{background:#2a9d8f;border:1px solid #2a9d8f;border-radius:3px;}'
+            'QCheckBox::indicator:unchecked{background:#f1f5f9;border:1px solid #cbd5e1;border-radius:3px;}'
+            'QCheckBox::indicator:checked{background:#0ea5e9;border:1px solid #0ea5e9;border-radius:3px;}'
         )
 
         self._save_status = QLabel('')
         self._save_status.setStyleSheet(
-            'color:#6c7086;font-size:11px;background:transparent;'
+            'color:#94a3b8;font-size:11px;background:transparent;'
         )
 
         tb.addWidget(logo)
@@ -479,7 +481,7 @@ class MainWindow(QMainWindow):
         # ── Search bar (Ctrl+F, hidden by default) ────────────────────────────
         search_bar = QWidget()
         search_bar.setVisible(False)
-        search_bar.setStyleSheet('background:#2b2d42;border-bottom:1px solid #1a1a2e;')
+        search_bar.setStyleSheet('background:#f8fafc;border-bottom:1px solid #e2e8f0;')
         search_bar.setFixedHeight(42)
         self._search_bar = search_bar
         sb_lay = QHBoxLayout(search_bar)
@@ -487,25 +489,25 @@ class MainWindow(QMainWindow):
         sb_lay.setSpacing(6)
 
         sb_lbl = QLabel('Find:')
-        sb_lbl.setStyleSheet('color:#cdd6f4;font-size:12px;background:transparent;')
+        sb_lbl.setStyleSheet('color:#475569;font-size:12px;background:transparent;')
 
         self._search_input = QLineEdit()
         self._search_input.setPlaceholderText('Search in both panels…')
         self._search_input.setFixedWidth(280)
         self._search_input.setStyleSheet(
-            'QLineEdit{background:#1e1e38;color:#cdd6f4;border:1px solid #45475a;'
+            'QLineEdit{background:#ffffff;color:#1e293b;border:1px solid #cbd5e1;'
             'border-radius:3px;padding:3px 8px;font-size:12px;}'
-            'QLineEdit:focus{border:1px solid #7c7faf;}'
+            'QLineEdit:focus{border:1px solid #6366f1;}'
         )
 
         self._search_count_lbl = QLabel('')
         self._search_count_lbl.setFixedWidth(120)
-        self._search_count_lbl.setStyleSheet('color:#a6adc8;font-size:11px;background:transparent;')
+        self._search_count_lbl.setStyleSheet('color:#64748b;font-size:11px;background:transparent;')
 
         _sbtn_ss = (
-            'QPushButton{background:#3a3a6a;color:#cdd6f4;border:none;'
+            'QPushButton{background:#f1f5f9;color:#475569;border:1px solid #e2e8f0;'
             'border-radius:3px;padding:3px 10px;font-size:11px;}'
-            'QPushButton:hover{background:#4a4a8a;}'
+            'QPushButton:hover{background:#e2e8f0;color:#334155;}'
         )
         btn_prev = QPushButton('▲ Prev')
         btn_prev.setStyleSheet(_sbtn_ss)
@@ -514,8 +516,8 @@ class MainWindow(QMainWindow):
         btn_close_search = QPushButton('✕')
         btn_close_search.setFixedWidth(28)
         btn_close_search.setStyleSheet(
-            'QPushButton{background:#45475a;color:#cdd6f4;border:none;border-radius:3px;font-size:11px;}'
-            'QPushButton:hover{background:#585b70;}'
+            'QPushButton{background:#fee2e2;color:#dc2626;border:none;border-radius:3px;font-size:11px;}'
+            'QPushButton:hover{background:#fecaca;}'
         )
 
         sb_lay.addWidget(sb_lbl)
@@ -560,21 +562,24 @@ class MainWindow(QMainWindow):
         xw.setSpacing(0)
 
         xml_hdr = QWidget()
-        xml_hdr.setStyleSheet('background:#2b2d42;')
+        xml_hdr.setStyleSheet(
+            'background:#f1f5f9;border-top:1px solid #e2e8f0;'
+            'border-bottom:1px solid #e2e8f0;'
+        )
         xml_hdr.setFixedHeight(28)
         xml_hdr_lay = QHBoxLayout(xml_hdr)
         xml_hdr_lay.setContentsMargins(10, 0, 6, 0)
         xml_hdr_lbl = QLabel('XML Editor')
         xml_hdr_lbl.setStyleSheet(
-            'color:#edf2f4;font-size:12px;font-weight:bold;'
+            'color:#334155;font-size:12px;font-weight:bold;'
             'letter-spacing:0.5px;background:transparent;'
         )
         self._btn_toggle_xml = QPushButton('▼ Hide')
         self._btn_toggle_xml.setFixedSize(58, 20)
         self._btn_toggle_xml.setStyleSheet(
-            'QPushButton{background:#3a3a5a;color:#a6adc8;border:none;'
+            'QPushButton{background:#e2e8f0;color:#64748b;border:none;'
             'border-radius:3px;font-size:10px;}'
-            'QPushButton:hover{background:#4a4a7a;color:#cdd6f4;}'
+            'QPushButton:hover{background:#cbd5e1;color:#334155;}'
         )
         xml_hdr_lay.addWidget(xml_hdr_lbl, 1)
         xml_hdr_lay.addWidget(self._btn_toggle_xml)
@@ -598,31 +603,33 @@ class MainWindow(QMainWindow):
         sw.setSpacing(0)
 
         sidebar_hdr = QWidget()
-        sidebar_hdr.setStyleSheet('background:#2b2d42;')
+        sidebar_hdr.setStyleSheet(
+            'background:#f1f5f9;border-bottom:1px solid #e2e8f0;'
+        )
         sidebar_hdr.setFixedHeight(28)
         sidebar_hdr_lay = QHBoxLayout(sidebar_hdr)
         sidebar_hdr_lay.setContentsMargins(10, 0, 6, 0)
         sidebar_hdr_lbl = QLabel('Changes')
         sidebar_hdr_lbl.setStyleSheet(
-            'color:#edf2f4;font-size:12px;font-weight:bold;'
+            'color:#334155;font-size:12px;font-weight:bold;'
             'letter-spacing:0.5px;background:transparent;'
         )
         self._btn_toggle_sidebar = QPushButton('◀ Hide')
         self._btn_toggle_sidebar.setFixedSize(58, 20)
         self._btn_toggle_sidebar.setStyleSheet(
-            'QPushButton{background:#3a3a5a;color:#a6adc8;border:none;'
+            'QPushButton{background:#e2e8f0;color:#64748b;border:none;'
             'border-radius:3px;font-size:10px;}'
-            'QPushButton:hover{background:#4a4a7a;color:#cdd6f4;}'
+            'QPushButton:hover{background:#cbd5e1;color:#334155;}'
         )
         sidebar_hdr_lay.addWidget(sidebar_hdr_lbl, 1)
         sidebar_hdr_lay.addWidget(self._btn_toggle_sidebar)
         sw.addWidget(sidebar_hdr)
 
         self.sidebar = QTextBrowser()
-        self.sidebar.setStyleSheet('background:#1e1e2e;border:none;')
+        self.sidebar.setStyleSheet('background:#ffffff;border:none;border-left:1px solid #e2e8f0;')
         self.sidebar.setOpenLinks(False)
         self.sidebar.setHtml(
-            '<body style="background:#1e1e2e;color:#585b70;font-family:Arial;'
+            '<body style="background:#ffffff;color:#94a3b8;font-family:Arial;'
             'font-size:12px;padding:12px;font-style:italic">'
             'Run Compare to see changes.</body>'
         )
@@ -637,7 +644,7 @@ class MainWindow(QMainWindow):
 
         # ── Legend bar ────────────────────────────────────────────────────────
         legend_bar = QWidget()
-        legend_bar.setStyleSheet('background:#f8f9fa;border-top:1px solid #dee2e6;')
+        legend_bar.setStyleSheet('background:#ffffff;border-top:1px solid #e2e8f0;')
         leg = QHBoxLayout(legend_bar)
         leg.setContentsMargins(12, 4, 12, 4)
         leg.addWidget(QLabel('<b>Legend:</b>'))
@@ -710,6 +717,11 @@ class MainWindow(QMainWindow):
             self._edit_mode = False
             self._recompare_timer.stop()
             self.btn_edit_text.setText('✎ Edit Text')
+            self.btn_edit_text.setStyleSheet(
+                'QPushButton{background:#6366f1;color:#fff;border:none;'
+                'padding:6px 16px;border-radius:4px;font-weight:600;}'
+                'QPushButton:hover{background:#4f46e5;}'
+            )
         self._stack.setCurrentIndex(0)
         self._status.showMessage('Select files to begin a new comparison.')
 
@@ -937,7 +949,7 @@ class MainWindow(QMainWindow):
 
     def _mark_unsaved(self):
         if self._xml_loaded:
-            self._set_saved_state('● Unsaved changes', '#f9e2af')
+            self._set_saved_state('● Unsaved changes', '#d97706')
 
     # ── Save XML ──────────────────────────────────────────────────────────────
     def _save_xml(self):
@@ -1006,10 +1018,10 @@ class MainWindow(QMainWindow):
         total = old_count + new_count
         if total == 0:
             self._search_count_lbl.setText('No matches')
-            self._search_count_lbl.setStyleSheet('color:#f38ba8;font-size:11px;background:transparent;')
+            self._search_count_lbl.setStyleSheet('color:#dc2626;font-size:11px;background:transparent;')
         else:
             self._search_count_lbl.setText(f'{total} match{"es" if total != 1 else ""}')
-            self._search_count_lbl.setStyleSheet('color:#a6e3a1;font-size:11px;background:transparent;')
+            self._search_count_lbl.setStyleSheet('color:#059669;font-size:11px;background:transparent;')
 
     def _search_next(self):
         text = self._search_input.text()
@@ -1060,6 +1072,11 @@ class MainWindow(QMainWindow):
             self.old_panel.browser.blockSignals(False)
             self.new_panel.browser.blockSignals(False)
             self.btn_edit_text.setText('✔ Done Editing')
+            self.btn_edit_text.setStyleSheet(
+                'QPushButton{background:#059669;color:#fff;border:none;'
+                'padding:6px 16px;border-radius:4px;font-weight:600;}'
+                'QPushButton:hover{background:#047857;}'
+            )
             self._status.showMessage(
                 'Edit mode — click anywhere in either panel to edit. '
                 'Comparison updates automatically as you type.'
@@ -1070,6 +1087,11 @@ class MainWindow(QMainWindow):
             self.old_panel.set_html(self._old_diff_html)
             self.new_panel.set_html(self._new_diff_html)
             self.btn_edit_text.setText('✎ Edit Text')
+            self.btn_edit_text.setStyleSheet(
+                'QPushButton{background:#6366f1;color:#fff;border:none;'
+                'padding:6px 16px;border-radius:4px;font-weight:600;}'
+                'QPushButton:hover{background:#4f46e5;}'
+            )
             self._status.showMessage('Compare view — showing latest comparison.')
 
     def _schedule_recompare(self):
