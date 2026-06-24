@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget,
     QSplitter, QPushButton, QFileDialog, QStatusBar,
     QLabel, QTextBrowser, QProgressBar, QCheckBox, QFrame, QLineEdit,
+    QPlainTextEdit,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QUrl
 from PySide6.QtGui import QKeySequence, QShortcut, QTextDocument
@@ -14,7 +15,18 @@ from ui.xml_editor import XmlEditor
 from logic.pdf_extractor import extract_pdf, render_pdf_preview
 from logic.xml_extractor import extract_xml
 from logic.differ import build_diff_html
-from models.document import Document
+from models.document import Document, TextBlock, TextSpan
+
+
+def _text_to_doc(text: str) -> Document:
+    """Convert plain text (one paragraph per non-empty line) to a Document."""
+    doc = Document()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            block = TextBlock(spans=[TextSpan(text=stripped)])
+            doc.blocks.append(block)
+    return doc
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +377,7 @@ class MainWindow(QMainWindow):
         self._worker:        _CompareWorker | None = None
         self._view_raw:      bool = False
         self._scroll_syncing: bool = False
+        self._edit_mode:     bool = False
 
         self._build_ui()
         self._wire_signals()
@@ -413,6 +426,28 @@ class MainWindow(QMainWindow):
         self.btn_export  = _btn('Export HTML',    '#2a7de1', '#1a6dd0')
         self.btn_save    = _btn('Save XML As…',   '#e76f51', '#d4623d')
 
+        # Panel-visibility toggles (always in toolbar for quick access)
+        _tgl_ss = (
+            'QPushButton{background:#2e2e50;color:#a6adc8;border:1px solid #3a3a6a;'
+            'border-radius:4px;padding:4px 10px;font-size:11px;}'
+            'QPushButton:hover{background:#3a3a6a;color:#cdd6f4;}'
+            'QPushButton:checked{background:#3a3a6a;color:#cdd6f4;}'
+        )
+        self._btn_sidebar_tb = QPushButton('Changes ◀')
+        self._btn_sidebar_tb.setStyleSheet(_tgl_ss)
+        self._btn_sidebar_tb.setCheckable(True)
+        self._btn_sidebar_tb.setChecked(False)
+
+        self._btn_xml_tb = QPushButton('XML ▼')
+        self._btn_xml_tb.setStyleSheet(_tgl_ss)
+        self._btn_xml_tb.setCheckable(True)
+        self._btn_xml_tb.setChecked(False)
+
+        # Edit-text mode
+        self.btn_edit_text = _btn('✎ Edit Text', '#6c757d', '#5a6268')
+        self.btn_recompare = _btn('↺ Re-compare', '#2a9d8f', '#21867a')
+        self.btn_recompare.setVisible(False)
+
         self._sync_cb = QCheckBox('Sync Scroll')
         self._sync_cb.setStyleSheet(
             'QCheckBox{color:#cdd6f4;font-size:12px;spacing:5px;}'
@@ -430,8 +465,14 @@ class MainWindow(QMainWindow):
         tb.addStretch()
         tb.addWidget(self.btn_back)
         tb.addWidget(_sep())
+        tb.addWidget(self._btn_sidebar_tb)
+        tb.addWidget(self._btn_xml_tb)
+        tb.addWidget(_sep())
         tb.addWidget(self._sync_cb)
         tb.addWidget(self.btn_view)
+        tb.addWidget(_sep())
+        tb.addWidget(self.btn_edit_text)
+        tb.addWidget(self.btn_recompare)
         tb.addWidget(_sep())
         tb.addWidget(self.btn_export)
         tb.addWidget(_sep())
@@ -490,6 +531,12 @@ class MainWindow(QMainWindow):
         sb_lay.addWidget(btn_close_search)
         root.addWidget(search_bar)
 
+        _edit_ss = (
+            'QPlainTextEdit{background:#1e1e2e;color:#cdd6f4;'
+            'font-family:"Consolas","Courier New",monospace;font-size:12px;'
+            'line-height:1.6;border:none;padding:10px;}'
+        )
+
         # ── Old PDF panel ─────────────────────────────────────────────────────
         old_wrap = QWidget()
         ow = QVBoxLayout(old_wrap)
@@ -497,7 +544,13 @@ class MainWindow(QMainWindow):
         ow.setSpacing(0)
         ow.addWidget(_panel_header('Old  (PDF)'))
         self.old_panel = DocumentPanel()
-        ow.addWidget(self.old_panel)
+        self._old_edit = QPlainTextEdit()
+        self._old_edit.setStyleSheet(_edit_ss)
+        self._old_edit.setPlaceholderText('Extracted text from Old PDF will appear here for editing…')
+        self._old_stack = QStackedWidget()
+        self._old_stack.addWidget(self.old_panel)   # index 0 — compare/view
+        self._old_stack.addWidget(self._old_edit)   # index 1 — edit mode
+        ow.addWidget(self._old_stack)
 
         # ── New PDF panel ─────────────────────────────────────────────────────
         new_wrap = QWidget()
@@ -506,7 +559,13 @@ class MainWindow(QMainWindow):
         nw.setSpacing(0)
         nw.addWidget(_panel_header('New  (PDF)'))
         self.new_panel = DocumentPanel()
-        nw.addWidget(self.new_panel)
+        self._new_edit = QPlainTextEdit()
+        self._new_edit.setStyleSheet(_edit_ss)
+        self._new_edit.setPlaceholderText('Extracted text from New PDF will appear here for editing…')
+        self._new_stack = QStackedWidget()
+        self._new_stack.addWidget(self.new_panel)   # index 0 — compare/view
+        self._new_stack.addWidget(self._new_edit)   # index 1 — edit mode
+        nw.addWidget(self._new_stack)
 
         # ── PDF row ───────────────────────────────────────────────────────────
         pdf_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -626,9 +685,11 @@ class MainWindow(QMainWindow):
         btn_prev.clicked.connect(self._search_prev)
         btn_close_search.clicked.connect(self._close_search)
 
-        # Wire up collapse buttons
+        # Wire up collapse buttons (panel header AND toolbar)
         self._btn_toggle_sidebar.clicked.connect(self._toggle_sidebar)
         self._btn_toggle_xml.clicked.connect(self._toggle_xml)
+        self._btn_sidebar_tb.clicked.connect(self._toggle_sidebar)
+        self._btn_xml_tb.clicked.connect(self._toggle_xml)
 
         return container
 
@@ -642,6 +703,8 @@ class MainWindow(QMainWindow):
         self.btn_view.clicked.connect(self._toggle_view)
         self.btn_export.clicked.connect(self._export_html)
         self.btn_save.clicked.connect(self._save_xml)
+        self.btn_edit_text.clicked.connect(self._toggle_edit_mode)
+        self.btn_recompare.clicked.connect(self._recompare_from_edited_text)
         QShortcut(QKeySequence('Ctrl+S'), self).activated.connect(self._save_xml)
         QShortcut(QKeySequence('Ctrl+F'), self).activated.connect(self._open_search)
         QShortcut(QKeySequence('Escape'), self._search_bar).activated.connect(self._close_search)
@@ -907,10 +970,14 @@ class MainWindow(QMainWindow):
         self.sidebar.setVisible(not visible)
         if visible:
             self._btn_toggle_sidebar.setText('▶ Show')
+            self._btn_sidebar_tb.setText('Changes ▶')
+            self._btn_sidebar_tb.setChecked(True)
             self._sidebar_wrap.setMaximumWidth(80)
         else:
             self._btn_toggle_sidebar.setText('◀ Hide')
-            self._sidebar_wrap.setMaximumWidth(16777215)  # Qt default max
+            self._btn_sidebar_tb.setText('Changes ◀')
+            self._btn_sidebar_tb.setChecked(False)
+            self._sidebar_wrap.setMaximumWidth(16777215)
             self._main_splitter.setSizes([1260, 310])
 
     def _toggle_xml(self):
@@ -918,9 +985,13 @@ class MainWindow(QMainWindow):
         self.xml_editor.setVisible(not visible)
         if visible:
             self._btn_toggle_xml.setText('▲ Show')
+            self._btn_xml_tb.setText('XML ▲')
+            self._btn_xml_tb.setChecked(True)
             self._left_splitter.setSizes([9999, 0])
         else:
             self._btn_toggle_xml.setText('▼ Hide')
+            self._btn_xml_tb.setText('XML ▼')
+            self._btn_xml_tb.setChecked(False)
             self._left_splitter.setSizes([560, 280])
 
     # ── Search bar ────────────────────────────────────────────────────────────
@@ -979,3 +1050,61 @@ class MainWindow(QMainWindow):
             self.new_panel.browser.setTextCursor(c_new)
             self.old_panel.browser.find(text, flags)
             self.new_panel.browser.find(text, flags)
+
+    # ── Edit text mode ────────────────────────────────────────────────────────
+    def _toggle_edit_mode(self):
+        if self._old_doc is None:
+            self._status.showMessage('Run a comparison first before editing text.')
+            return
+
+        self._edit_mode = not self._edit_mode
+
+        if self._edit_mode:
+            # Populate editors with plain extracted text
+            self._old_edit.setPlainText(self._old_doc.plain_text())
+            self._new_edit.setPlainText(self._new_doc.plain_text())
+            # Switch stacks to edit view
+            self._old_stack.setCurrentIndex(1)
+            self._new_stack.setCurrentIndex(1)
+            self.btn_edit_text.setText('✎ Cancel Edit')
+            self.btn_recompare.setVisible(True)
+            self._status.showMessage(
+                'Edit mode — modify extracted text, then click ↺ Re-compare.'
+            )
+        else:
+            # Restore compare view without re-running diff
+            self._old_stack.setCurrentIndex(0)
+            self._new_stack.setCurrentIndex(0)
+            self.btn_edit_text.setText('✎ Edit Text')
+            self.btn_recompare.setVisible(False)
+            self._status.showMessage('Edit cancelled — comparison view restored.')
+
+    def _recompare_from_edited_text(self):
+        old_text = self._old_edit.toPlainText()
+        new_text = self._new_edit.toPlainText()
+
+        self._old_doc = _text_to_doc(old_text)
+        self._new_doc = _text_to_doc(new_text)
+
+        self._status.showMessage('Re-comparing edited text…')
+        try:
+            self._old_diff_html, self._new_diff_html, sidebar_html = build_diff_html(
+                self._old_doc, self._new_doc
+            )
+        except Exception as e:
+            self._status.showMessage(f'Re-compare error: {e}')
+            return
+
+        self.old_panel.set_html(self._old_diff_html)
+        self.new_panel.set_html(self._new_diff_html)
+        self.sidebar.setHtml(sidebar_html)
+
+        # Exit edit mode and return to compare view
+        self._edit_mode = False
+        self._old_stack.setCurrentIndex(0)
+        self._new_stack.setCurrentIndex(0)
+        self.btn_edit_text.setText('✎ Edit Text')
+        self.btn_recompare.setVisible(False)
+        self._view_raw = False
+        self.btn_view.setText('PDF Page View')
+        self._status.showMessage('Re-compare complete from edited text.')
