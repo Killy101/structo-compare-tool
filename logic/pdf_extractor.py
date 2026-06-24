@@ -18,7 +18,7 @@ PDF -> our internal ``Document`` model.
 import re
 import fitz                               # pip install pymupdf
 from models.document import Document, TextBlock, TextSpan
-from typing import List
+from typing import Any, List
 
 # A leading list marker: bullet glyphs, "1." / "1)" / "a." / "iv." etc.
 _LIST_RE = re.compile(r'^\s*([•‣●▪◦⁃∙o\-\*]|'
@@ -123,7 +123,10 @@ def extract_pdf(path: str) -> Document:
         # -------------------------------------------------------------
         # 3. Extract the raw text + per-span metadata
         # -------------------------------------------------------------
-        raw = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+        # ``get_text("dict", ...)`` returns a nested dict at runtime, but the
+        # PyMuPDF stub types it as ``str``; annotate as Any so the type
+        # checker doesn't flag the dict indexing / .get() calls below.
+        raw: Any = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
 
         # Work out the page's left text margin and the dominant body font
         # size so we can reconstruct indentation and detect headings.

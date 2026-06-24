@@ -11,7 +11,7 @@ PDF extractor produces.
     unknown element as plain text – the diff engine will then ignore it.
 """
 
-from lxml import etree
+from lxml import etree  # type: ignore[attr-defined]  # C-extension, no stubs
 from models.document import Document, TextBlock, TextSpan
 from typing import List
 

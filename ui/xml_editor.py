@@ -1,6 +1,6 @@
 # ui/xml_editor.py
 import re as _re
-from lxml import etree
+from lxml import etree  # type: ignore[attr-defined]  # C-extension, no stubs
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
