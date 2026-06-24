@@ -48,7 +48,7 @@ def extract_pdf(path: str) -> Document:
     pdf = fitz.open(path)
 
     for page in pdf:
-        # Annotation-based strikethrough rects
+        # ── Annotation-based detection ────────────────────────────────────────
         strike_rects = [
             annot.rect for annot in page.annots()
             if annot.type[1] == 'StrikeOut'
@@ -57,8 +57,14 @@ def extract_pdf(path: str) -> Document:
             annot.rect for annot in page.annots()
             if annot.type[1] == 'Underline'
         ]
+        # Hyperlinks (/Link annotations) are visually underlined but encoded as
+        # Link annotations, not Underline annotations — collect them separately.
+        try:
+            link_rects = [fitz.Rect(lk['from']) for lk in page.get_links()]
+        except Exception:
+            link_rects = []
 
-        # Drawing-based detection
+        # ── Drawing-based detection ───────────────────────────────────────────
         try:
             drawings = page.get_drawings()
         except Exception:
@@ -74,8 +80,6 @@ def extract_pdf(path: str) -> Document:
                 for span_data in line['spans']:
                     flags = span_data['flags']
                     font = span_data.get('font', '').lower()
-                    # Bold/italic may be encoded via the flag bits OR the font name
-                    # (e.g. "TimesNewRomanPS-BoldMT", "Calibri-Italic").
                     bold = (
                         bool(flags & 16)
                         or 'bold' in font or 'black' in font or 'heavy' in font
@@ -88,16 +92,31 @@ def extract_pdf(path: str) -> Document:
 
                     span_rect = fitz.Rect(span_data['bbox'])
 
-                    # Strikethrough: annotation-based OR drawn horizontal line at mid-height
+                    # Drawing-based detection with tightened tolerances so that
+                    # underlines drawn near the baseline (~85% of span height)
+                    # are never mistaken for strikethroughs (~45% of span height).
+                    #   Strikethrough zone: [20%, 70%] from top of span
+                    #   Underline zone:     [67%, 107%] from top of span
+                    # The small overlap [67–70%] is resolved by preferring underline.
+                    _draw_strike    = _check_line_overlap(
+                        span_rect, drawings, mid_y_frac=0.45, tolerance_frac=0.25)
+                    _draw_underline = _check_line_overlap(
+                        span_rect, drawings, mid_y_frac=0.87, tolerance_frac=0.20)
+
+                    # A line detected by both sits in the 67–70% overlap zone,
+                    # which is far closer to the baseline than to the text mid —
+                    # treat it as underline only.
+                    if _draw_strike and _draw_underline:
+                        _draw_strike = False
+
                     strikethrough = (
                         any(span_rect.intersects(r) for r in strike_rects)
-                        or _check_line_overlap(span_rect, drawings, mid_y_frac=0.5, tolerance_frac=0.4)
+                        or _draw_strike
                     )
-
-                    # Underline: annotation-based OR drawn horizontal line near bottom
                     underline = (
                         any(span_rect.intersects(r) for r in underline_rects)
-                        or _check_line_overlap(span_rect, drawings, mid_y_frac=0.9, tolerance_frac=0.25)
+                        or any(span_rect.intersects(r) for r in link_rects)
+                        or _draw_underline
                     )
 
                     text = span_data['text']
