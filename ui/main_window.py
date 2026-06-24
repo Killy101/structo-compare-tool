@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QSplitter, QPushButton, QFileDialog, QStatusBar,
     QLabel, QTextBrowser, QProgressBar, QCheckBox, QFrame, QLineEdit,
 )
-from PySide6.QtCore import Qt, QThread, Signal, QUrl
+from PySide6.QtCore import Qt, QThread, Signal, QUrl, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut, QTextDocument
 
 from ui.document_panel import DocumentPanel
@@ -14,7 +14,18 @@ from ui.xml_editor import XmlEditor
 from logic.pdf_extractor import extract_pdf, render_pdf_preview
 from logic.xml_extractor import extract_xml
 from logic.differ import build_diff_html
-from models.document import Document
+from models.document import Document, TextBlock, TextSpan
+
+
+def _text_to_doc(text: str) -> Document:
+    """Convert plain text (one paragraph per non-empty line) to a Document."""
+    doc = Document()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            block = TextBlock(spans=[TextSpan(text=stripped)])
+            doc.blocks.append(block)
+    return doc
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +376,7 @@ class MainWindow(QMainWindow):
         self._worker:        _CompareWorker | None = None
         self._view_raw:      bool = False
         self._scroll_syncing: bool = False
+        self._edit_mode:     bool = False
 
         self._build_ui()
         self._wire_signals()
@@ -413,6 +425,26 @@ class MainWindow(QMainWindow):
         self.btn_export  = _btn('Export HTML',    '#2a7de1', '#1a6dd0')
         self.btn_save    = _btn('Save XML As…',   '#e76f51', '#d4623d')
 
+        # Panel-visibility toggles (always in toolbar for quick access)
+        _tgl_ss = (
+            'QPushButton{background:#2e2e50;color:#a6adc8;border:1px solid #3a3a6a;'
+            'border-radius:4px;padding:4px 10px;font-size:11px;}'
+            'QPushButton:hover{background:#3a3a6a;color:#cdd6f4;}'
+            'QPushButton:checked{background:#3a3a6a;color:#cdd6f4;}'
+        )
+        self._btn_sidebar_tb = QPushButton('Changes ◀')
+        self._btn_sidebar_tb.setStyleSheet(_tgl_ss)
+        self._btn_sidebar_tb.setCheckable(True)
+        self._btn_sidebar_tb.setChecked(False)
+
+        self._btn_xml_tb = QPushButton('XML ▼')
+        self._btn_xml_tb.setStyleSheet(_tgl_ss)
+        self._btn_xml_tb.setCheckable(True)
+        self._btn_xml_tb.setChecked(False)
+
+        # Edit-text mode
+        self.btn_edit_text = _btn('✎ Edit Text', '#6c757d', '#5a6268')
+
         self._sync_cb = QCheckBox('Sync Scroll')
         self._sync_cb.setStyleSheet(
             'QCheckBox{color:#cdd6f4;font-size:12px;spacing:5px;}'
@@ -430,8 +462,13 @@ class MainWindow(QMainWindow):
         tb.addStretch()
         tb.addWidget(self.btn_back)
         tb.addWidget(_sep())
+        tb.addWidget(self._btn_sidebar_tb)
+        tb.addWidget(self._btn_xml_tb)
+        tb.addWidget(_sep())
         tb.addWidget(self._sync_cb)
         tb.addWidget(self.btn_view)
+        tb.addWidget(_sep())
+        tb.addWidget(self.btn_edit_text)
         tb.addWidget(_sep())
         tb.addWidget(self.btn_export)
         tb.addWidget(_sep())
@@ -626,9 +663,11 @@ class MainWindow(QMainWindow):
         btn_prev.clicked.connect(self._search_prev)
         btn_close_search.clicked.connect(self._close_search)
 
-        # Wire up collapse buttons
+        # Wire up collapse buttons (panel header AND toolbar)
         self._btn_toggle_sidebar.clicked.connect(self._toggle_sidebar)
         self._btn_toggle_xml.clicked.connect(self._toggle_xml)
+        self._btn_sidebar_tb.clicked.connect(self._toggle_sidebar)
+        self._btn_xml_tb.clicked.connect(self._toggle_xml)
 
         return container
 
@@ -642,7 +681,16 @@ class MainWindow(QMainWindow):
         self.btn_view.clicked.connect(self._toggle_view)
         self.btn_export.clicked.connect(self._export_html)
         self.btn_save.clicked.connect(self._save_xml)
+        self.btn_edit_text.clicked.connect(self._toggle_edit_mode)
         QShortcut(QKeySequence('Ctrl+S'), self).activated.connect(self._save_xml)
+
+        # Auto-recompare: fires 800 ms after the user stops typing in either panel
+        self._recompare_timer = QTimer()
+        self._recompare_timer.setSingleShot(True)
+        self._recompare_timer.setInterval(800)
+        self._recompare_timer.timeout.connect(self._recompare_from_edited_text)
+        self.old_panel.browser.textChanged.connect(self._schedule_recompare)
+        self.new_panel.browser.textChanged.connect(self._schedule_recompare)
         QShortcut(QKeySequence('Ctrl+F'), self).activated.connect(self._open_search)
         QShortcut(QKeySequence('Escape'), self._search_bar).activated.connect(self._close_search)
 
@@ -658,6 +706,10 @@ class MainWindow(QMainWindow):
 
     # ── Upload / compare flow ─────────────────────────────────────────────────
     def _go_to_upload(self):
+        if self._edit_mode:
+            self._edit_mode = False
+            self._recompare_timer.stop()
+            self.btn_edit_text.setText('✎ Edit Text')
         self._stack.setCurrentIndex(0)
         self._status.showMessage('Select files to begin a new comparison.')
 
@@ -719,6 +771,9 @@ class MainWindow(QMainWindow):
     # ── View mode toggle ──────────────────────────────────────────────────────
     def _toggle_view(self):
         if self._old_doc is None:
+            return
+        if self._edit_mode:
+            self._status.showMessage('Exit edit mode first (click ✔ Done Editing).')
             return
         self._view_raw = not self._view_raw
         if self._view_raw:
@@ -907,10 +962,14 @@ class MainWindow(QMainWindow):
         self.sidebar.setVisible(not visible)
         if visible:
             self._btn_toggle_sidebar.setText('▶ Show')
+            self._btn_sidebar_tb.setText('Changes ▶')
+            self._btn_sidebar_tb.setChecked(True)
             self._sidebar_wrap.setMaximumWidth(80)
         else:
             self._btn_toggle_sidebar.setText('◀ Hide')
-            self._sidebar_wrap.setMaximumWidth(16777215)  # Qt default max
+            self._btn_sidebar_tb.setText('Changes ◀')
+            self._btn_sidebar_tb.setChecked(False)
+            self._sidebar_wrap.setMaximumWidth(16777215)
             self._main_splitter.setSizes([1260, 310])
 
     def _toggle_xml(self):
@@ -918,9 +977,13 @@ class MainWindow(QMainWindow):
         self.xml_editor.setVisible(not visible)
         if visible:
             self._btn_toggle_xml.setText('▲ Show')
+            self._btn_xml_tb.setText('XML ▲')
+            self._btn_xml_tb.setChecked(True)
             self._left_splitter.setSizes([9999, 0])
         else:
             self._btn_toggle_xml.setText('▼ Hide')
+            self._btn_xml_tb.setText('XML ▼')
+            self._btn_xml_tb.setChecked(False)
             self._left_splitter.setSizes([560, 280])
 
     # ── Search bar ────────────────────────────────────────────────────────────
@@ -979,3 +1042,64 @@ class MainWindow(QMainWindow):
             self.new_panel.browser.setTextCursor(c_new)
             self.old_panel.browser.find(text, flags)
             self.new_panel.browser.find(text, flags)
+
+    # ── Edit text mode ────────────────────────────────────────────────────────
+    def _toggle_edit_mode(self):
+        if self._old_doc is None:
+            self._status.showMessage('Run a comparison first before editing text.')
+            return
+
+        self._edit_mode = not self._edit_mode
+
+        if self._edit_mode:
+            # Block signals while loading plain text so it doesn't fire auto-recompare
+            self.old_panel.browser.blockSignals(True)
+            self.new_panel.browser.blockSignals(True)
+            self.old_panel.set_editable(self._old_doc.plain_text())
+            self.new_panel.set_editable(self._new_doc.plain_text())
+            self.old_panel.browser.blockSignals(False)
+            self.new_panel.browser.blockSignals(False)
+            self.btn_edit_text.setText('✔ Done Editing')
+            self._status.showMessage(
+                'Edit mode — click anywhere in either panel to edit. '
+                'Comparison updates automatically as you type.'
+            )
+        else:
+            self._recompare_timer.stop()
+            # Show the latest diff (auto-recompare keeps it up to date)
+            self.old_panel.set_html(self._old_diff_html)
+            self.new_panel.set_html(self._new_diff_html)
+            self.btn_edit_text.setText('✎ Edit Text')
+            self._status.showMessage('Compare view — showing latest comparison.')
+
+    def _schedule_recompare(self):
+        if self._edit_mode:
+            self._recompare_timer.start()
+            self._status.showMessage('Editing… comparison will update automatically.')
+
+    def _recompare_from_edited_text(self):
+        if not self._edit_mode:
+            return
+        old_text = self.old_panel.browser.toPlainText()
+        new_text = self.new_panel.browser.toPlainText()
+
+        self._old_doc = _text_to_doc(old_text)
+        self._new_doc = _text_to_doc(new_text)
+
+        self._status.showMessage('Auto-comparing…')
+        try:
+            self._old_diff_html, self._new_diff_html, sidebar_html = build_diff_html(
+                self._old_doc, self._new_doc
+            )
+        except Exception as e:
+            self._status.showMessage(f'Auto-compare error: {e}')
+            return
+
+        # Update sidebar for live change-count feedback while still editing.
+        # The HTML panels refresh when the user clicks "✔ Done Editing".
+        self.sidebar.setHtml(sidebar_html)
+        self._view_raw = False
+        self.btn_view.setText('PDF Page View')
+        self._status.showMessage(
+            'Comparison ready. Keep editing or click ✔ Done Editing to see the diff.'
+        )
