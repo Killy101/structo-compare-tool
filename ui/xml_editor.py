@@ -643,6 +643,8 @@ class _CodeEdit(QPlainTextEdit):
 
         # ---- 1. Auto-close tag on '>' ----------------------------------------
         # Handled first so popup state never suppresses it.
+        # The regex already rejects </tag> patterns (requires [A-Za-z_] after <),
+        # so the only extra guard needed is to exclude self-closing />  tags.
         if char == '>':
             if self._ac_popup and self._ac_popup.isVisible():
                 self._ac_popup.hide()
@@ -650,15 +652,14 @@ class _CodeEdit(QPlainTextEdit):
             cursor = self.textCursor()
             line_up_to = cursor.block().text()[:cursor.positionInBlock()] + '>'
             m = self._OPEN_TAG_RE.search(line_up_to)
-            if m and not line_up_to.rstrip().endswith('/>') \
-                    and not line_up_to.lstrip().startswith('</'):
-                super().keyPressEvent(event)
+            if m and not line_up_to.rstrip().endswith('/>'):
                 tag   = m.group(1)
-                c     = self.textCursor()
                 close = f'</{tag}>'
-                c.insertText(close)
-                c.setPosition(c.position() - len(close))
-                self.setTextCursor(c)
+                cursor.beginEditBlock()
+                cursor.insertText('>' + close)
+                cursor.setPosition(cursor.position() - len(close))
+                cursor.endEditBlock()
+                self.setTextCursor(cursor)
                 return
             super().keyPressEvent(event)
             return
@@ -1619,7 +1620,7 @@ class XmlEditor(QWidget):
         QShortcut(QKeySequence('Alt+S'), self).activated.connect(lambda: self._wrap_with_tag('s'))
 
         QShortcut(QKeySequence('Ctrl+Shift+E'), self).activated.connect(
-            lambda: self._wrap_with_tag('innodReplace', 'userEdit="true"'))
+            lambda: self._wrap_with_tag('innodReplace', 'userEdit="true"', multiline=True))
 
         # Structo structure templates
         QShortcut(QKeySequence('Alt+P'), self).activated.connect(self._tpl_paragraph)
@@ -1723,24 +1724,32 @@ class XmlEditor(QWidget):
     # -------------------------------------------------------------------
     # Tag wrapping
     # -------------------------------------------------------------------
-    def _wrap_with_tag(self, tag: str, attrs: str = ''):
+    def _wrap_with_tag(self, tag: str, attrs: str = '', multiline: bool = False):
         cur       = self._edit.textCursor()
-        open_tag  = f'<{tag}{(" " + attrs) if attrs else ""}>'
-        close_tag = f'</{tag}>'
+        open_tag  = '<' + tag + ((' ' + attrs) if attrs else '') + '>'
+        close_tag = '</' + tag + '>'
+        indent = ''
+        if multiline:
+            sp       = min(cur.anchor(), cur.position()) if cur.hasSelection() else cur.position()
+            raw_line = self._edit.document().findBlock(sp).text()
+            indent   = raw_line[:len(raw_line) - len(raw_line.lstrip(' \t'))]
         cur.beginEditBlock()
         if cur.hasSelection():
-            # selectedText() uses  paragraph separators — read the plain
-            # document text at the selection's byte offsets instead.
             start    = min(cur.anchor(), cur.position())
             end      = max(cur.anchor(), cur.position())
             selected = self._edit.toPlainText()[start:end]
-            cur.insertText(f'{open_tag}{selected}{close_tag}')
+            if multiline:
+                cur.insertText(open_tag + '\n' + indent + '    ' + selected + '\n' + indent + close_tag)
+            else:
+                cur.insertText(open_tag + selected + close_tag)
             cur.endEditBlock()
         else:
-            cur.insertText(f'{open_tag}{close_tag}')
-            end_pos = cur.position() - len(close_tag)
-            # Close the edit block BEFORE repositioning the cursor so that
-            # cursorPositionChanged doesn't fire inside the edit block.
+            if multiline:
+                cur.insertText(open_tag + '\n' + indent + '    \n' + indent + close_tag)
+                end_pos = cur.position() - len('\n' + indent + close_tag)
+            else:
+                cur.insertText(open_tag + close_tag)
+                end_pos = cur.position() - len(close_tag)
             cur.endEditBlock()
             cur.setPosition(end_pos)
             self._edit.setTextCursor(cur)
