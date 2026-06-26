@@ -437,7 +437,7 @@ class _CodeEdit(QPlainTextEdit):
         tag_name = m.group(2)
 
         fmt = QTextCharFormat()
-        fmt.setBackground(QColor('#fce7f3'))
+        fmt.setBackground(QColor("#ce0ec4"))
 
         def _sel(start: int, end: int) -> QTextEdit.ExtraSelection:
             s = QTextEdit.ExtraSelection()
@@ -1494,7 +1494,7 @@ class XmlEditor(QWidget):
         close_tag = f'</{tag}>'
         cur.beginEditBlock()
         if cur.hasSelection():
-            # selectedText() uses   paragraph separators — read the plain
+            # selectedText() uses  paragraph separators — read the plain
             # document text at the selection's byte offsets instead.
             start    = min(cur.anchor(), cur.position())
             end      = max(cur.anchor(), cur.position())
