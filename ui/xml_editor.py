@@ -1494,12 +1494,21 @@ class XmlEditor(QWidget):
         close_tag = f'</{tag}>'
         cur.beginEditBlock()
         if cur.hasSelection():
-            cur.insertText(f'{open_tag}{cur.selectedText()}{close_tag}')
+            # selectedText() uses   paragraph separators — read the plain
+            # document text at the selection's byte offsets instead.
+            start    = min(cur.anchor(), cur.position())
+            end      = max(cur.anchor(), cur.position())
+            selected = self._edit.toPlainText()[start:end]
+            cur.insertText(f'{open_tag}{selected}{close_tag}')
+            cur.endEditBlock()
         else:
             cur.insertText(f'{open_tag}{close_tag}')
-            cur.setPosition(cur.position() - len(close_tag))
+            end_pos = cur.position() - len(close_tag)
+            # Close the edit block BEFORE repositioning the cursor so that
+            # cursorPositionChanged doesn't fire inside the edit block.
+            cur.endEditBlock()
+            cur.setPosition(end_pos)
             self._edit.setTextCursor(cur)
-        cur.endEditBlock()
 
     # -------------------------------------------------------------------
     # Template insertion

@@ -543,6 +543,7 @@ class MainWindow(QMainWindow):
         self._old_path:         str = ''
         self._new_path:         str = ''
         self._xml_baseline:     str = ''   # XML text as loaded — before any user edits
+        self._xml_save_path:    str = ''   # last save path for direct Ctrl+S
         self._worker:           _CompareWorker | None = None
         self._pdf_worker:       _PdfRenderWorker | None = None
         self._xml_worker:       _XmlLoadWorker | None = None
@@ -989,6 +990,7 @@ class MainWindow(QMainWindow):
         self._changes = []
         self._change_index = -1
         self._xml_baseline = ''
+        self._xml_save_path = ''
         self._view_raw = False
         self._pdf_zoom = 2.0
 
@@ -1088,6 +1090,7 @@ class MainWindow(QMainWindow):
     def _on_xml_loaded(self, raw_xml: str):
         self.xml_editor.setPlainText(raw_xml)
         self._xml_baseline = raw_xml   # Snapshot before any user edits
+        self._xml_save_path = getattr(self._upload_page, 'xml_path', '')
         self._xml_loaded = True
         self._set_saved_state('XML loaded — not yet saved')
         self._xml_worker = None
@@ -1249,7 +1252,7 @@ class MainWindow(QMainWindow):
     def _build_export_menu(self):
         from PySide6.QtWidgets import QMenu
         menu = QMenu(self)
-        menu.addAction('Save Final XML…', self._save_xml)
+        menu.addAction('Save Final XML…', self._save_xml_as)
         menu.addAction('Save Explanation HTML…', self._export_html)
         self.btn_export.setMenu(menu)
 
@@ -1644,7 +1647,24 @@ span.fmt-changed {
 
     # ── Save XML ──────────────────────────────────────────────────────────────
     def _save_xml(self):
-        # Format first (no-op if invalid XML), then save — matches Ctrl+S spec
+        """Ctrl+S — save directly to the known path; show dialog on first save."""
+        self.xml_editor.format_xml()
+        if self._xml_save_path:
+            try:
+                with open(self._xml_save_path, 'w', encoding='utf-8') as f:
+                    f.write(self.xml_editor.toPlainText())
+                self._status.showMessage(f'Saved: {self._xml_save_path}')
+                self._set_saved_state(
+                    f'✓ Saved · {os.path.basename(self._xml_save_path)}',
+                    '#a6e3a1')
+            except Exception as e:
+                self._status.showMessage(f'Save error: {e}')
+                self._set_saved_state('✕ Save failed', '#f38ba8')
+            return
+        self._save_xml_as()
+
+    def _save_xml_as(self):
+        """Export menu → Save Final XML… — always show the Save dialog."""
         self.xml_editor.format_xml()
         path, _ = QFileDialog.getSaveFileName(
             self, 'Save XML As', '',
@@ -1655,6 +1675,7 @@ span.fmt-changed {
         try:
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(self.xml_editor.toPlainText())
+            self._xml_save_path = path
             self._status.showMessage(f'Saved: {path}')
             self._set_saved_state(f'✓ Saved · {os.path.basename(path)}', '#a6e3a1')
         except Exception as e:
