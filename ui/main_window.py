@@ -158,126 +158,104 @@ def _panel_header(text: str) -> QLabel:
     return lbl
 
 
-def _legend_chip(color: str, text: str) -> QLabel:
-    lbl = QLabel(f'  {text}  ')
-    lbl.setStyleSheet(
-        f'background:{color};padding:2px 10px;border-radius:3px;'
-        'font-size:11px;border:1px solid rgba(0,0,0,0.15);'
-        'color:#1e293b;font-weight:500;'
-    )
-    return lbl
-
-
-def _sep() -> QFrame:
-    f = QFrame()
-    f.setFrameShape(QFrame.Shape.VLine)
-    f.setStyleSheet('color:#e2e8f0;')
-    return f
-
-
-# ---------------------------------------------------------------------------
-# Per-panel inline search bar
-# ---------------------------------------------------------------------------
-class _PanelSearchBar(QWidget):
-    """Compact search strip pinned below a panel header; hidden until Ctrl+F."""
+class _PanelHeader(QWidget):
+    """Panel header with an embedded search bar on the right side."""
 
     _SS_INPUT = (
-        'QLineEdit{background:#ffffff;color:#1e293b;border:1px solid #cbd5e1;'
-        'border-radius:3px;padding:2px 8px;font-size:12px;}'
-        'QLineEdit:focus{border:1px solid #6366f1;}'
+        'QLineEdit{background:#ffffff;color:#1e293b;border:1px solid #c7d2fe;'
+        'border-radius:3px;padding:1px 8px;font-size:11px;}'
+        'QLineEdit:focus{border:1px solid #6366f1;outline:none;}'
     )
-    _SS_BTN = (
-        'QPushButton{background:#f1f5f9;color:#475569;border:1px solid #e2e8f0;'
-        'border-radius:3px;padding:2px 8px;font-size:11px;min-width:24px;}'
-        'QPushButton:hover{background:#e2e8f0;color:#334155;}'
+    _SS_NAV = (
+        'QPushButton{background:#e0e7ff;color:#4338ca;border:none;'
+        'border-radius:3px;font-size:10px;font-weight:bold;}'
+        'QPushButton:hover{background:#c7d2fe;}'
+        'QPushButton:disabled{background:#f1f5f9;color:#cbd5e1;}'
     )
 
-    def __init__(self, panel: 'DocumentPanel', placeholder: str, parent=None):
+    def __init__(self, title: str, panel: 'DocumentPanel', parent=None):
         super().__init__(parent)
         self._panel = panel
-        self.setFixedHeight(36)
-        self.setStyleSheet('background:#f0f4ff;border-bottom:1px solid #c7d2fe;')
-        self.setVisible(False)
+        self.setFixedHeight(38)
+        self.setStyleSheet(
+            'background:#f1f5f9;border-bottom:1px solid #e2e8f0;'
+        )
 
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(8, 3, 8, 3)
-        lay.setSpacing(5)
+        lay.setContentsMargins(10, 0, 8, 0)
+        lay.setSpacing(6)
 
-        icon = QLabel('🔍')
-        icon.setFixedWidth(18)
-        icon.setStyleSheet('background:transparent;font-size:11px;')
+        title_lbl = QLabel(title)
+        title_lbl.setStyleSheet(
+            'color:#334155;font-weight:bold;font-size:12px;'
+            'letter-spacing:0.4px;background:transparent;'
+        )
 
         self._input = QLineEdit()
-        self._input.setPlaceholderText(placeholder)
+        self._input.setPlaceholderText('Search…')
+        self._input.setFixedWidth(180)
+        self._input.setFixedHeight(24)
         self._input.setStyleSheet(self._SS_INPUT)
 
         self._count_lbl = QLabel('')
-        self._count_lbl.setFixedWidth(88)
+        self._count_lbl.setFixedWidth(80)
         self._count_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._count_lbl.setStyleSheet('color:#64748b;font-size:11px;background:transparent;')
+        self._count_lbl.setStyleSheet(
+            'color:#64748b;font-size:10px;background:transparent;')
 
-        btn_prev = QPushButton('▲')
-        btn_prev.setStyleSheet(self._SS_BTN)
-        btn_prev.setFixedWidth(28)
-        btn_prev.setToolTip('Previous match  (Shift+Enter)')
+        self._btn_prev = QPushButton('▲')
+        self._btn_prev.setFixedSize(22, 22)
+        self._btn_prev.setStyleSheet(self._SS_NAV)
+        self._btn_prev.setToolTip('Previous match  (Shift+Enter)')
+        self._btn_prev.setEnabled(False)
 
-        btn_next = QPushButton('▼')
-        btn_next.setStyleSheet(self._SS_BTN)
-        btn_next.setFixedWidth(28)
-        btn_next.setToolTip('Next match  (Enter)')
+        self._btn_next = QPushButton('▼')
+        self._btn_next.setFixedSize(22, 22)
+        self._btn_next.setStyleSheet(self._SS_NAV)
+        self._btn_next.setToolTip('Next match  (Enter)')
+        self._btn_next.setEnabled(False)
 
-        btn_close = QPushButton('✕')
-        btn_close.setFixedWidth(26)
-        btn_close.setStyleSheet(
-            'QPushButton{background:#fee2e2;color:#dc2626;border:none;'
-            'border-radius:3px;font-size:11px;}'
-            'QPushButton:hover{background:#fecaca;}'
-        )
-        btn_close.setToolTip('Close search  (Esc)')
-
-        lay.addWidget(icon)
-        lay.addWidget(self._input, 1)
+        lay.addWidget(title_lbl, 1)
+        lay.addWidget(self._input)
         lay.addWidget(self._count_lbl)
-        lay.addWidget(btn_prev)
-        lay.addWidget(btn_next)
-        lay.addWidget(btn_close)
+        lay.addWidget(self._btn_prev)
+        lay.addWidget(self._btn_next)
 
         self._input.textChanged.connect(self._on_changed)
         self._input.returnPressed.connect(self.find_next)
-        btn_next.clicked.connect(self.find_next)
-        btn_prev.clicked.connect(self.find_prev)
-        btn_close.clicked.connect(self.close_bar)
+        self._btn_next.clicked.connect(self.find_next)
+        self._btn_prev.clicked.connect(self.find_prev)
 
     # ------------------------------------------------------------------
-    def open_bar(self):
-        self.setVisible(True)
+    def focus_search(self):
         self._input.setFocus()
         self._input.selectAll()
 
-    def close_bar(self):
-        self.setVisible(False)
-        self._count_lbl.setText('')
-
-    def set_query(self, text: str):
-        """Pre-fill the query (e.g. when Ctrl+F is pressed with selection)."""
-        self._input.setText(text)
+    def clear_search(self):
+        self._input.clear()
 
     # ------------------------------------------------------------------
     def _on_changed(self, text: str):
         browser = self._panel.browser
         if not text:
             self._count_lbl.setText('')
+            self._btn_prev.setEnabled(False)
+            self._btn_next.setEnabled(False)
             return
         n = browser.toPlainText().lower().count(text.lower())
         if n == 0:
             self._count_lbl.setText('No matches')
             self._count_lbl.setStyleSheet(
-                'color:#dc2626;font-size:11px;background:transparent;')
+                'color:#dc2626;font-size:10px;background:transparent;')
+            self._btn_prev.setEnabled(False)
+            self._btn_next.setEnabled(False)
         else:
             self._count_lbl.setText(f'{n} match{"es" if n != 1 else ""}')
             self._count_lbl.setStyleSheet(
-                'color:#059669;font-size:11px;background:transparent;')
-            # Jump to the first occurrence
+                'color:#059669;font-size:10px;background:transparent;')
+            self._btn_prev.setEnabled(True)
+            self._btn_next.setEnabled(True)
+            # Jump to the first hit
             c = browser.textCursor()
             c.movePosition(QTextCursor.MoveOperation.Start)
             browser.setTextCursor(c)
@@ -303,6 +281,23 @@ class _PanelSearchBar(QWidget):
             c.movePosition(QTextCursor.MoveOperation.End)
             self._panel.browser.setTextCursor(c)
             self._panel.browser.find(text, flags)
+
+
+def _legend_chip(color: str, text: str) -> QLabel:
+    lbl = QLabel(f'  {text}  ')
+    lbl.setStyleSheet(
+        f'background:{color};padding:2px 10px;border-radius:3px;'
+        'font-size:11px;border:1px solid rgba(0,0,0,0.15);'
+        'color:#1e293b;font-weight:500;'
+    )
+    return lbl
+
+
+def _sep() -> QFrame:
+    f = QFrame()
+    f.setFrameShape(QFrame.Shape.VLine)
+    f.setStyleSheet('color:#e2e8f0;')
+    return f
 
 
 # ---------------------------------------------------------------------------
@@ -1012,10 +1007,12 @@ class MainWindow(QMainWindow):
         ow = QVBoxLayout(old_wrap)
         ow.setContentsMargins(0, 0, 0, 0)
         ow.setSpacing(0)
-        ow.addWidget(_panel_header('Old PDF  ·  editable — fix alignment then ⟳ Re-Compare'))
         self.old_panel = DocumentPanel()
-        self._old_search = _PanelSearchBar(self.old_panel, 'Search in Old PDF…')
-        ow.addWidget(self._old_search)
+        self._old_hdr = _PanelHeader(
+            'Old PDF  ·  editable — fix alignment then ⟳ Re-Compare',
+            self.old_panel,
+        )
+        ow.addWidget(self._old_hdr)
         ow.addWidget(self.old_panel)
 
         # ── New PDF panel ─────────────────────────────────────────────────────
@@ -1023,10 +1020,12 @@ class MainWindow(QMainWindow):
         nw = QVBoxLayout(new_wrap)
         nw.setContentsMargins(0, 0, 0, 0)
         nw.setSpacing(0)
-        nw.addWidget(_panel_header('New PDF  ·  editable — fix alignment then ⟳ Re-Compare'))
         self.new_panel = DocumentPanel()
-        self._new_search = _PanelSearchBar(self.new_panel, 'Search in New PDF…')
-        nw.addWidget(self._new_search)
+        self._new_hdr = _PanelHeader(
+            'New PDF  ·  editable — fix alignment then ⟳ Re-Compare',
+            self.new_panel,
+        )
+        nw.addWidget(self._new_hdr)
         nw.addWidget(self.new_panel)
 
         # ── PDF row ───────────────────────────────────────────────────────────
@@ -2009,13 +2008,11 @@ span.fmt-changed {
 
     # ── Search bar ────────────────────────────────────────────────────────────
     def _open_search(self):
-        """Ctrl+F — show both per-panel search bars; focus the Old PDF one."""
-        self._old_search.open_bar()
-        self._new_search.open_bar()
-        self._old_search._input.setFocus()
+        """Ctrl+F — focus the Old PDF panel's search input."""
+        self._old_hdr.focus_search()
 
     def _close_search(self):
-        """Hide both per-panel search bars."""
-        self._old_search.close_bar()
-        self._new_search.close_bar()
+        """Clear both panel search inputs (called on session reset)."""
+        self._old_hdr.clear_search()
+        self._new_hdr.clear_search()
 
