@@ -22,9 +22,10 @@ from models.document import Document
 # Background worker — extracts PDFs and runs diff in one go
 # ---------------------------------------------------------------------------
 class _CompareWorker(QThread):
-    progress = Signal(str, int)   # status message, percent (0–100)
-    done     = Signal()
-    error    = Signal(str)
+    progress  = Signal(str, int)   # status message, percent (0–100)
+    extracted = Signal()           # both PDFs parsed; diff not yet built
+    done      = Signal()
+    error     = Signal(str)
 
     def __init__(self, old_path: str, new_path: str):
         super().__init__()
@@ -40,15 +41,18 @@ class _CompareWorker(QThread):
 
     def run(self):
         try:
-            self.progress.emit('Extracting PDFs (parallel)…', 10)
+            self.progress.emit('Extracting PDFs…', 5)
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
                 old_fut = pool.submit(extract_pdf, self.old_path)
                 new_fut = pool.submit(extract_pdf, self.new_path)
                 self.old_doc = old_fut.result()
-                self.progress.emit('Old PDF extracted…', 45)
+                self.progress.emit('Old PDF extracted…', 40)
                 self.new_doc = new_fut.result()
 
-            self.progress.emit('Comparing documents…', 75)
+            self.progress.emit('PDFs loaded — rendering preview…', 55)
+            self.extracted.emit()   # show plain text immediately before diff
+
+            self.progress.emit('Computing diff…', 65)
             self.old_html, self.new_html, self.sidebar_html, self.changes = \
                 build_diff_html(self.old_doc, self.new_doc)
 
@@ -1047,9 +1051,36 @@ class MainWindow(QMainWindow):
         self._worker.progress.connect(
             lambda msg, _pct: self._status.showMessage(msg)
         )
+        self._worker.extracted.connect(self._on_extract_done)
         self._worker.done.connect(self._on_compare_done)
         self._worker.error.connect(self._on_compare_error)
         self._worker.start()
+
+    def _on_extract_done(self):
+        """Called as soon as both PDFs are parsed (before diff runs).
+
+        Switches to the compare view and renders plain text immediately so
+        the user sees content while the diff computation continues in the
+        background thread.
+        """
+        w = self._worker
+        if w is None or w.old_doc is None or w.new_doc is None:
+            return
+
+        self._old_doc = w.old_doc
+        self._new_doc = w.new_doc
+        self._view_raw = False
+        self.btn_view.setText('PDF Page View')
+        for wdg in self._zoom_widgets:
+            wdg.setVisible(False)
+
+        # Show plain (un-highlighted) text immediately
+        self.old_panel.set_html(w.old_doc.to_html())
+        self.new_panel.set_html(w.new_doc.to_html())
+        self.sidebar.setHtml('')
+
+        self._stack.setCurrentIndex(2)
+        self._status.showMessage('Text loaded — computing diff highlights…')
 
     def _on_compare_done(self):
         w = self._worker
@@ -1066,10 +1097,6 @@ class MainWindow(QMainWindow):
         self._new_diff_html = w.new_html
         self._changes = w.changes
         self._change_index = -1
-        self._view_raw = False
-        self.btn_view.setText('PDF Page View')
-        for wdg in self._zoom_widgets:
-            wdg.setVisible(False)
 
         self.old_panel.set_html(self._old_diff_html)
         self.new_panel.set_html(self._new_diff_html)

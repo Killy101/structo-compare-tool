@@ -42,6 +42,10 @@ _PLACEHOLDER = _CSS + """
 
 _STYLE_VIEW = 'background:#ffffff;border:none;'
 
+# Load the first chunk synchronously, defer the rest via QTimer so the UI
+# stays responsive on large documents. Tuned to roughly 80 KB of HTML.
+_CHUNK_CHARS = 80_000
+
 
 class DocumentPanel(QWidget):
     """Side‑by‑side compare panel.
@@ -64,16 +68,60 @@ class DocumentPanel(QWidget):
         self.browser.setHtml(_PLACEHOLDER)
         layout.addWidget(self.browser)
 
+        self._load_gen = 0   # incremented on every set_html(); stale deferred chunks bail out
+
     # -------------------------------------------------------------------
     def set_html(self, content: str):
         self.browser.setStyleSheet(_STYLE_VIEW)
-        # Preserve the caret/scroll position when re‑rendering after a compare.
         sb = self.browser.verticalScrollBar()
-        pos = sb.value()
+        saved_pos = sb.value()
+
+        self._load_gen += 1
+        gen = self._load_gen
+
+        if len(content) <= _CHUNK_CHARS:
+            self.browser.setHtml(
+                f'<html><head>{_CSS}</head><body>{content}</body></html>'
+            )
+            sb.setValue(min(saved_pos, sb.maximum()))
+            return
+
+        # Load the first chunk now so the panel shows content immediately,
+        # then schedule the remainder via zero-delay timers so Qt can process
+        # paint/input events between chunks.
+        split = content.rfind('</p>', 0, _CHUNK_CHARS + 500)
+        split = (split + 4) if split >= 0 else _CHUNK_CHARS
+        first, rest = content[:split], content[split:]
+
         self.browser.setHtml(
-            f'<html><head>{_CSS}</head><body>{content}</body></html>'
+            f'<html><head>{_CSS}</head><body>{first}</body></html>'
         )
-        sb.setValue(min(pos, sb.maximum()))
+        sb.setValue(min(saved_pos, sb.maximum()))
+
+        if rest:
+            QTimer.singleShot(0, lambda: self._append_html(rest, gen))
+
+    # -------------------------------------------------------------------
+    def _append_html(self, fragment: str, gen: int):
+        """Append one chunk of HTML at the document's end, then reschedule."""
+        if gen != self._load_gen:
+            return   # a newer set_html() was called; discard stale work
+
+        if len(fragment) <= _CHUNK_CHARS:
+            to_add, rest = fragment, ''
+        else:
+            split = fragment.rfind('</p>', 0, _CHUNK_CHARS + 500)
+            if split >= 0:
+                to_add, rest = fragment[:split + 4], fragment[split + 4:]
+            else:
+                to_add, rest = fragment, ''
+
+        cur = self.browser.textCursor()
+        cur.movePosition(QTextCursor.MoveOperation.End)
+        cur.insertHtml(to_add)
+
+        if rest:
+            QTimer.singleShot(0, lambda: self._append_html(rest, gen))
 
     # -------------------------------------------------------------------
     def set_plain(self, text: str):
