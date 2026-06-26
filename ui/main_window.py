@@ -51,12 +51,31 @@ class _CompareWorker(QThread):
                 self.progress.emit('Old PDF extracted…', 40)
                 self.new_doc = new_fut.result()
 
-            # Build plain text here (worker thread) so the main thread only
-            # has to call setPlainText(), not generate the strings.
-            self.old_plain = self.old_doc.display_text()
-            self.new_plain = self.new_doc.display_text()
-            self.progress.emit('PDFs loaded — rendering preview…', 55)
-            self.extracted.emit()   # show plain text immediately before diff
+            # Build a plain-text preview here (worker thread) so the main thread
+            # only has to call setPlainText() on a small string.
+            # For very large documents (>3 000 blocks total) skip the preview
+            # phase entirely — setPlainText() on megabytes of text would freeze
+            # the main thread for 10-30 s, which is worse than staying on the
+            # processing screen.
+            total_blocks = len(self.old_doc.blocks) + len(self.new_doc.blocks)
+            _PREVIEW_CAP = 3_000   # blocks; ~150 pages
+            _CHAR_CAP    = 80_000  # characters; ~40 KB per panel
+            if total_blocks <= _PREVIEW_CAP:
+                def _preview(doc):
+                    txt = doc.display_text()
+                    if len(txt) > _CHAR_CAP:
+                        cut = txt.rfind('\n', 0, _CHAR_CAP)
+                        cut = cut if cut > 0 else _CHAR_CAP
+                        return txt[:cut] + '\n\n… computing diff, full document loading …'
+                    return txt
+                self.old_plain = _preview(self.old_doc)
+                self.new_plain = _preview(self.new_doc)
+                self.progress.emit('PDFs loaded — rendering preview…', 55)
+                self.extracted.emit()   # show plain text immediately before diff
+            else:
+                self.progress.emit(
+                    f'Large document ({total_blocks // 2:,} blocks/PDF) — '
+                    'computing diff…', 55)
 
             self.progress.emit('Computing diff…', 65)
             self.old_html, self.new_html, self.sidebar_html, self.changes = \

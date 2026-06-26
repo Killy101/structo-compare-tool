@@ -333,10 +333,16 @@ def build_diff_html(old_doc: Document, new_doc: Document) -> Tuple[str, str, str
     stats = {"added": 0, "deleted": 0, "modified": 0}
     cnum = 0
 
-    # Level-1: block-level diff (autojunk off — blocks are long; false junk is bad)
+    # Level-1: block-level diff.
+    # autojunk=False is accurate for small/medium docs; for very large ones
+    # (>4 000 blocks total) the O(n²) cost becomes prohibitive, so we fall
+    # back to autojunk=True which treats frequently-repeated paragraphs as
+    # "junk" and skips them — much faster with only minor accuracy loss.
     old_hashes = [_block_text(b) for b in old_blocks]
     new_hashes = [_block_text(b) for b in new_blocks]
-    block_matcher = difflib.SequenceMatcher(None, old_hashes, new_hashes, autojunk=False)
+    _large_doc  = (len(old_hashes) + len(new_hashes)) > 4_000
+    block_matcher = difflib.SequenceMatcher(
+        None, old_hashes, new_hashes, autojunk=_large_doc)
 
     for btag, oi1, oi2, ni1, ni2 in block_matcher.get_opcodes():
         if btag == "equal":
