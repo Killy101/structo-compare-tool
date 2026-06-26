@@ -104,7 +104,7 @@ def extract_pdf(path: str) -> Document:
     which means it is safe to run inside a ``QThread``.
     """
     doc = Document()
-    pdf = fitz.open(path)
+    pdf: Any = fitz.open(path)
 
     for page_num, page in enumerate(pdf):
         # Yield the GIL every 10 pages so the main-thread event loop stays
