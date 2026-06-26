@@ -1257,9 +1257,7 @@ class MainWindow(QMainWindow):
     def _build_export_menu(self):
         from PySide6.QtWidgets import QMenu
         menu = QMenu(self)
-        menu.addAction('Side-by-side HTML…', self._export_html)
-        menu.addAction('Change list (XML)…', self._export_xml)
-        menu.addAction('PDF report…', self._export_pdf_report)
+        menu.addAction('Save Explanation HTML…', self._export_html)
         self.btn_export.setMenu(menu)
 
     def _export_html(self):
@@ -1563,18 +1561,14 @@ class MainWindow(QMainWindow):
 
     # ── Collapse / expand panels ──────────────────────────────────────────────
     def _toggle_sidebar(self):
-        visible = self.sidebar.isVisible()
-        self.sidebar.setVisible(not visible)
+        visible = self._sidebar_wrap.isVisible()
+        self._sidebar_wrap.setVisible(not visible)
         if visible:
-            self._btn_toggle_sidebar.setText('▶ Show')
             self._btn_sidebar_tb.setText('Changes ▶')
             self._btn_sidebar_tb.setChecked(True)
-            self._sidebar_wrap.setMaximumWidth(80)
         else:
-            self._btn_toggle_sidebar.setText('◀ Hide')
             self._btn_sidebar_tb.setText('Changes ◀')
             self._btn_sidebar_tb.setChecked(False)
-            self._sidebar_wrap.setMaximumWidth(16777215)
             self._main_splitter.setSizes([1260, 310])
 
     def _toggle_xml(self):

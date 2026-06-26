@@ -182,15 +182,15 @@ def _sidebar_item(kind: str, label: str, old_txt: str, new_txt: str, cid: str) -
     if old_txt and new_txt:
         detail = (
             f'<div style="margin-top:3px;font-size:11px">'
-            f'<span style="text-decoration:line-through;color:#f38ba8">{oe}</span>'
-            f' <span style="color:#89b4fa">→</span> '
-            f'<span style="color:#a6e3a1">{ne}</span>'
+            f'<span style="text-decoration:line-through;color:#ef4444">{oe}</span>'
+            f' <span style="color:#6366f1">→</span> '
+            f'<span style="color:#16a34a">{ne}</span>'
             f"</div>"
         )
     elif old_txt:
-        detail = f'<div style="margin-top:3px;font-size:11px;text-decoration:line-through;color:#f38ba8">{oe}</div>'
+        detail = f'<div style="margin-top:3px;font-size:11px;text-decoration:line-through;color:#ef4444">{oe}</div>'
     else:
-        detail = f'<div style="margin-top:3px;font-size:11px;color:#a6e3a1">{ne}</div>'
+        detail = f'<div style="margin-top:3px;font-size:11px;color:#16a34a">{ne}</div>'
 
     href = f"#{kind}:{cid}"
     return (
@@ -347,29 +347,29 @@ def _build_sidebar(items: List[str], stats: dict) -> str:
     total = sum(stats.values())
     css = """<style>
       body { font-family:Arial,sans-serif; font-size:12px;
-             background:#1e1e2e; color:#cdd6f4; margin:0; padding:8px; }
-      .header { font-size:13px; font-weight:bold; color:#cba6f7;
+             background:#ffffff; color:#1e293b; margin:0; padding:8px; }
+      .header { font-size:13px; font-weight:bold; color:#4f46e5;
                 margin-bottom:4px; padding-bottom:6px;
-                border-bottom:1px solid #45475a; }
+                border-bottom:1px solid #e2e8f0; }
       .stats  { font-size:11px; margin-bottom:8px; line-height:2; }
       .stat   { display:inline-block; padding:1px 7px; border-radius:3px;
                 margin-right:4px; font-weight:bold; }
-      .s-del  { background:#f38ba8; color:#1e1e2e; }
-      .s-add  { background:#a6e3a1; color:#1e1e2e; }
-      .s-mod  { background:#ffd699; color:#1e1e2e; }
+      .s-del  { background:#fecaca; color:#991b1b; }
+      .s-add  { background:#bbf7d0; color:#166534; }
+      .s-mod  { background:#fde68a; color:#92400e; }
       .ch     { margin:4px 0; padding:6px 8px; border-radius:5px;
-                background:#313244; cursor:pointer; }
-      .ch:hover { background:#3d3f5a; }
-      .del    { border-left:3px solid #f38ba8; }
-      .add    { border-left:3px solid #a6e3a1; }
-      .mod    { border-left:3px solid #ffd699; }
+                background:#f8fafc; border:1px solid #e2e8f0; cursor:pointer; }
+      .ch:hover { background:#f1f5f9; }
+      .del    { border-left:3px solid #ef4444; }
+      .add    { border-left:3px solid #22c55e; }
+      .mod    { border-left:3px solid #f59e0b; }
       .badge  { display:inline-block; font-size:10px; font-weight:bold;
                 padding:1px 6px; border-radius:3px; margin-right:6px;
                 vertical-align:middle; }
-      .bdel   { background:#f38ba8; color:#1e1e2e; }
-      .badd   { background:#a6e3a1; color:#1e1e2e; }
-      .bmod   { background:#ffd699; color:#1e1e2e; }
-      .empty  { color:#585b70; font-style:italic; text-align:center;
+      .bdel   { background:#fecaca; color:#991b1b; }
+      .badd   { background:#bbf7d0; color:#166534; }
+      .bmod   { background:#fde68a; color:#92400e; }
+      .empty  { color:#94a3b8; font-style:italic; text-align:center;
                 margin-top:40px; }
       a { text-decoration:none; color:inherit; }
     </style>"""
