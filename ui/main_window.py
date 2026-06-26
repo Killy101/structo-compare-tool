@@ -13,7 +13,6 @@ from PySide6.QtGui import QKeySequence, QShortcut, QTextDocument, QColor, QPalet
 from ui.document_panel import DocumentPanel
 from ui.xml_editor import XmlEditor
 from logic.pdf_extractor import extract_pdf, render_pdf_preview, clear_render_cache
-from logic.xml_extractor import extract_xml
 from logic.differ import build_diff_html
 from models.document import Document
 
@@ -52,6 +51,26 @@ class _CompareWorker(QThread):
 
             self.progress.emit('Done', 100)
             self.done.emit()
+        except Exception as exc:
+            self.error.emit(str(exc) + '\n\n' + traceback.format_exc())
+
+
+# ---------------------------------------------------------------------------
+# Background worker — loads and parses a large XML file off the main thread
+# ---------------------------------------------------------------------------
+class _XmlLoadWorker(QThread):
+    done  = Signal(str)   # raw XML text
+    error = Signal(str)
+
+    def __init__(self, path: str):
+        super().__init__()
+        self.path = path
+
+    def run(self):
+        try:
+            from logic.xml_extractor import extract_xml
+            xml_doc = extract_xml(self.path)
+            self.done.emit(xml_doc.raw_xml)
         except Exception as exc:
             self.error.emit(str(exc) + '\n\n' + traceback.format_exc())
 
@@ -127,12 +146,14 @@ def _sep() -> QFrame:
 # ---------------------------------------------------------------------------
 # Upload screen (page 0)
 # ---------------------------------------------------------------------------
-_ROW_BASE = ('QFrame{background:#f8fafc;border:1px dashed #cbd5e1;'
-             'border-radius:8px;}')
+_ROW_BASE  = ('QFrame{background:#f8fafc;border:1px dashed #cbd5e1;'
+              'border-radius:10px;}')
 _ROW_HOVER = ('QFrame{background:#eef2ff;border:2px dashed #6366f1;'
-              'border-radius:8px;}')
-_ROW_OK = ('QFrame{background:#f0fdf4;border:1px solid #86efac;'
-           'border-radius:8px;}')
+              'border-radius:10px;}')
+_ROW_OK    = ('QFrame{background:#f0fdf4;border:2px solid #22c55e;'
+              'border-radius:10px;}')
+_ROW_ERR   = ('QFrame{background:#fef2f2;border:2px solid #f87171;'
+              'border-radius:10px;}')
 
 
 class _UploadPage(QWidget):
@@ -142,105 +163,164 @@ class _UploadPage(QWidget):
 
         outer = QVBoxLayout(self)
         outer.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        outer.setContentsMargins(20, 20, 20, 20)
 
         card = QWidget()
-        card.setFixedWidth(560)
+        card.setFixedWidth(640)
         card.setStyleSheet(
-            'background:#ffffff;border-radius:12px;border:1px solid #e2e8f0;'
+            'background:#ffffff;border-radius:16px;border:1px solid #e2e8f0;'
         )
         card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(40, 36, 40, 36)
-        card_layout.setSpacing(20)
+        card_layout.setContentsMargins(0, 0, 0, 36)
+        card_layout.setSpacing(0)
 
-        # Title
+        # ── Header band ───────────────────────────────────────────────────────
+        header = QWidget()
+        header.setFixedHeight(96)
+        header.setStyleSheet(
+            'background:qlineargradient(x1:0,y1:0,x2:1,y2:1,'
+            'stop:0 #6366f1,stop:1 #0ea5e9);'
+            'border-radius:16px 16px 0 0;'
+        )
+        hl = QVBoxLayout(header)
+        hl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title = QLabel('Structo Compare')
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet(
-            'color:#1e293b;font-size:26px;font-weight:bold;'
-            'letter-spacing:1px;background:transparent;'
+            'color:#ffffff;font-size:26px;font-weight:bold;'
+            'letter-spacing:1.5px;background:transparent;'
         )
         subtitle = QLabel('Document Comparison Tool')
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        subtitle.setStyleSheet('color:#64748b;font-size:13px;background:transparent;')
-        card_layout.addWidget(title)
-        card_layout.addWidget(subtitle)
+        subtitle.setStyleSheet(
+            'color:rgba(255,255,255,0.80);font-size:13px;background:transparent;'
+        )
+        hl.addWidget(title)
+        hl.addWidget(subtitle)
+        card_layout.addWidget(header)
 
-        # Divider
-        div = QFrame()
-        div.setFrameShape(QFrame.Shape.HLine)
-        div.setStyleSheet('color:#e2e8f0;')
-        card_layout.addWidget(div)
+        # ── File rows ─────────────────────────────────────────────────────────
+        rows_wrap = QWidget()
+        rows_wrap.setStyleSheet('background:transparent;')
+        rl = QVBoxLayout(rows_wrap)
+        rl.setContentsMargins(32, 28, 32, 0)
+        rl.setSpacing(14)
 
-        # Drop-zone style row helper
-        def file_row(icon: str, label: str, optional: bool = False):
+        def _file_row(icon: str, label: str, ext_hint: str, optional: bool = False):
             row = QFrame()
+            row.setMinimumHeight(72)
             row.setStyleSheet(_ROW_BASE)
-            rl = QHBoxLayout(row)
-            rl.setContentsMargins(14, 10, 14, 10)
-            rl.setSpacing(10)
+            row.setAcceptDrops(False)   # drag handled at page level
 
-            lbl = QLabel(f'{icon}  {label}')
-            lbl.setStyleSheet(
-                'color:#334155;font-size:13px;font-weight:bold;'
+            rlay = QHBoxLayout(row)
+            rlay.setContentsMargins(16, 12, 16, 12)
+            rlay.setSpacing(14)
+
+            # Icon
+            icon_lbl = QLabel(icon)
+            icon_lbl.setFixedSize(40, 40)
+            icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            icon_lbl.setStyleSheet(
+                'font-size:22px;background:transparent;border:none;'
+            )
+
+            # Info column
+            info = QVBoxLayout()
+            info.setSpacing(2)
+
+            type_lbl = QLabel(label + (' <span style="color:#94a3b8;font-size:10px">'
+                                       '(optional)</span>' if optional else ''))
+            type_lbl.setStyleSheet(
+                'color:#334155;font-size:13px;font-weight:700;'
                 'background:transparent;border:none;'
             )
-            lbl.setFixedWidth(120)
+            type_lbl.setTextFormat(Qt.TextFormat.RichText)
 
-            info_wrap = QVBoxLayout()
-            info_wrap.setSpacing(1)
-            fname = QLabel('Drop file here  ·  or browse')
+            fname = QLabel(f'Drop {ext_hint} here  ·  or browse')
             fname.setStyleSheet(
-                'color:#94a3b8;font-size:12px;background:transparent;border:none;'
+                'color:#94a3b8;font-size:11px;background:transparent;border:none;'
             )
-            status = QLabel('optional' if optional else '')
+
+            status = QLabel('')
             status.setStyleSheet(
                 'color:#94a3b8;font-size:10px;background:transparent;border:none;'
             )
-            info_wrap.addWidget(fname)
-            info_wrap.addWidget(status)
 
+            info.addWidget(type_lbl)
+            info.addWidget(fname)
+            info.addWidget(status)
+
+            # Browse button
             browse = _btn('Browse…', '#6366f1', '#4f46e5')
-            browse.setFixedWidth(90)
+            browse.setFixedWidth(96)
+            browse.setFixedHeight(34)
 
-            rl.addWidget(lbl)
-            rl.addLayout(info_wrap, 1)
-            rl.addWidget(browse)
+            rlay.addWidget(icon_lbl)
+            rlay.addLayout(info, 1)
+            rlay.addWidget(browse)
             return row, fname, status, browse
 
-        self._old_row, self._old_lbl, self._old_status, self._btn_old = file_row('📄', 'Old PDF')
-        self._new_row, self._new_lbl, self._new_status, self._btn_new = file_row('📄', 'New PDF')
-        self._xml_row, self._xml_lbl, self._xml_status, self._btn_xml = file_row('📋', 'XML File', optional=True)
+        self._old_row, self._old_lbl, self._old_status, self._btn_old = \
+            _file_row('📄', 'Old PDF', '.pdf file')
+        self._new_row, self._new_lbl, self._new_status, self._btn_new = \
+            _file_row('📄', 'New PDF', '.pdf file')
+        self._xml_row, self._xml_lbl, self._xml_status, self._btn_xml = \
+            _file_row('📋', 'XML File', '.xml / .xhtml file', optional=True)
 
-        card_layout.addWidget(self._old_row)
-        card_layout.addWidget(self._new_row)
-        card_layout.addWidget(self._xml_row)
+        rl.addWidget(self._old_row)
+        rl.addWidget(self._new_row)
+        rl.addWidget(self._xml_row)
+        card_layout.addWidget(rows_wrap)
 
-        self._rows = {'old': self._old_row, 'new': self._new_row, 'xml': self._xml_row}
-        self._default_lbl = 'Drop file here  ·  or browse'
+        self._rows = {
+            'old': self._old_row,
+            'new': self._new_row,
+            'xml': self._xml_row,
+        }
+        self._default_lbl = {
+            'old': '.pdf file', 'new': '.pdf file', 'xml': '.xml / .xhtml file',
+        }
         self.setAcceptDrops(True)
 
-        # Compare button
-        self.btn_compare = _btn('⟳  Compare', '#0ea5e9', '#0284c7', min_w=160)
-        self.btn_compare.setFixedHeight(40)
+        # ── Compare button ────────────────────────────────────────────────────
+        btn_wrap = QWidget()
+        btn_wrap.setStyleSheet('background:transparent;')
+        bwl = QVBoxLayout(btn_wrap)
+        bwl.setContentsMargins(32, 20, 32, 0)
+        bwl.setSpacing(10)
+
+        self.btn_compare = _btn('⟳  Compare', '#0ea5e9', '#0284c7', min_w=200)
+        self.btn_compare.setFixedHeight(44)
         self.btn_compare.setEnabled(False)
+        self.btn_compare.setStyleSheet(
+            'QPushButton{background:#0ea5e9;color:#fff;border:none;'
+            'padding:8px 24px;border-radius:8px;font-weight:700;font-size:14px;'
+            'letter-spacing:0.5px;}'
+            'QPushButton:hover{background:#0284c7;}'
+            'QPushButton:disabled{background:#e2e8f0;color:#94a3b8;}'
+        )
+
         cmp_wrap = QHBoxLayout()
         cmp_wrap.setAlignment(Qt.AlignmentFlag.AlignCenter)
         cmp_wrap.addWidget(self.btn_compare)
-        card_layout.addLayout(cmp_wrap)
+        bwl.addLayout(cmp_wrap)
 
         self._hint = QLabel('Select Old PDF and New PDF to enable comparison.')
         self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._hint.setStyleSheet('color:#94a3b8;font-size:11px;background:transparent;')
-        card_layout.addWidget(self._hint)
+        self._hint.setStyleSheet(
+            'color:#94a3b8;font-size:11px;background:transparent;'
+        )
+        bwl.addWidget(self._hint)
+        card_layout.addWidget(btn_wrap)
 
         outer.addWidget(card)
 
-        # State
+        # ── State ─────────────────────────────────────────────────────────────
         self.old_path: str = ''
         self.new_path: str = ''
         self.xml_path: str = ''
 
-        # Signals
+        # ── Signals ───────────────────────────────────────────────────────────
         self._btn_old.clicked.connect(lambda: self._browse('old'))
         self._btn_new.clicked.connect(lambda: self._browse('new'))
         self._btn_xml.clicked.connect(lambda: self._browse('xml'))
@@ -297,18 +377,25 @@ class _UploadPage(QWidget):
 
         if ok:
             setattr(self, f'{kind}_path', path)
-            lbl.setText(f'{os.path.basename(path)}  ·  {self._human_size(path)}')
-            lbl.setStyleSheet('color:#334155;font-size:12px;background:transparent;border:none;')
-            status.setText(msg)
-            status.setStyleSheet('color:#059669;font-size:10px;background:transparent;border:none;')
+            size_str = self._human_size(path)
+            lbl.setText(f'{os.path.basename(path)}  ·  {size_str}')
+            lbl.setStyleSheet(
+                'color:#1e293b;font-size:12px;font-weight:600;'
+                'background:transparent;border:none;'
+            )
+            status.setText(f'✓  {msg}')
+            status.setStyleSheet(
+                'color:#059669;font-size:10px;font-weight:600;'
+                'background:transparent;border:none;'
+            )
             row.setStyleSheet(_ROW_OK)
         else:
             setattr(self, f'{kind}_path', '')
             lbl.setText(os.path.basename(path))
             lbl.setStyleSheet('color:#334155;font-size:12px;background:transparent;border:none;')
-            status.setText(msg)
+            status.setText(f'✕  {msg}')
             status.setStyleSheet('color:#dc2626;font-size:10px;background:transparent;border:none;')
-            row.setStyleSheet(_ROW_BASE)
+            row.setStyleSheet(_ROW_ERR)
 
         self._update_compare()
 
@@ -321,9 +408,10 @@ class _UploadPage(QWidget):
             'new': (self._new_lbl, self._new_status, False),
             'xml': (self._xml_lbl, self._xml_status, True),
         }.items():
-            lbl.setText(self._default_lbl)
-            lbl.setStyleSheet('color:#94a3b8;font-size:12px;background:transparent;border:none;')
-            status.setText('optional' if optional else '')
+            default = f'Drop {self._default_lbl[kind]} here  ·  or browse'
+            lbl.setText(default)
+            lbl.setStyleSheet('color:#94a3b8;font-size:11px;background:transparent;border:none;')
+            status.setText('')
             status.setStyleSheet('color:#94a3b8;font-size:10px;background:transparent;border:none;')
             self._rows[kind].setStyleSheet(_ROW_BASE)
         self._update_compare()
@@ -453,6 +541,7 @@ class MainWindow(QMainWindow):
         self._new_path:         str = ''
         self._worker:           _CompareWorker | None = None
         self._pdf_worker:       _PdfRenderWorker | None = None
+        self._xml_worker:       _XmlLoadWorker | None = None
         self._view_raw:         bool = False
         self._scroll_syncing:   bool = False
         self._changes:          list = []
@@ -886,6 +975,17 @@ class MainWindow(QMainWindow):
                 self._pdf_worker.wait(2000)
             self._pdf_worker = None
 
+        if self._xml_worker is not None:
+            try:
+                self._xml_worker.done.disconnect()
+                self._xml_worker.error.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            if self._xml_worker.isRunning():
+                self._xml_worker.quit()
+                self._xml_worker.wait(2000)
+            self._xml_worker = None
+
         # In-memory results
         self._old_doc = None
         self._new_doc = None
@@ -929,15 +1029,13 @@ class MainWindow(QMainWindow):
         # Clear any stale PDF render cache from a previous session
         clear_render_cache()
 
-        # Load XML immediately (lightweight)
+        # Load XML in background (can be large)
         if up.xml_path:
-            try:
-                xml_doc = extract_xml(up.xml_path)
-                self.xml_editor.setPlainText(xml_doc.raw_xml)
-                self._xml_loaded = True
-                self._set_saved_state('XML loaded — not yet saved')
-            except Exception as e:
-                self._status.showMessage(f'XML load error: {e}')
+            self._xml_worker = _XmlLoadWorker(up.xml_path)
+            self._xml_worker.done.connect(self._on_xml_loaded)
+            self._xml_worker.error.connect(self._on_xml_error)
+            self._xml_worker.start()
+            self._set_saved_state('Loading XML…', '#6366f1')
 
         # Remember paths for PDF Page View
         self._old_path = up.old_path
@@ -992,6 +1090,17 @@ class MainWindow(QMainWindow):
     def _on_compare_error(self, msg: str):
         self._stack.setCurrentIndex(0)
         self._status.showMessage(f'Compare error: {msg[:120]}')
+
+    def _on_xml_loaded(self, raw_xml: str):
+        self.xml_editor.setPlainText(raw_xml)
+        self._xml_loaded = True
+        self._set_saved_state('XML loaded — not yet saved')
+        self._xml_worker = None
+
+    def _on_xml_error(self, msg: str):
+        self._status.showMessage(f'XML load error: {msg[:120]}')
+        self._set_saved_state('XML load failed', '#dc2626')
+        self._xml_worker = None
 
     # ── View mode toggle ──────────────────────────────────────────────────────
     def _toggle_view(self):

@@ -7,13 +7,14 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPlainTextEdit, QTextEdit, QTextBrowser, QSplitter,
     QPushButton, QLabel, QLineEdit, QCheckBox,
+    QListWidget, QListWidgetItem,
     QMessageBox, QInputDialog, QScrollArea, QDialog, QToolTip,
 )
 from PySide6.QtGui import (
     QSyntaxHighlighter, QTextCharFormat, QColor, QFont,
     QKeySequence, QShortcut, QTextCursor, QTextDocument, QPainter,
 )
-from PySide6.QtCore import QRegularExpression, Qt, QSize, QRect, QTimer, QEvent
+from PySide6.QtCore import QRegularExpression, Qt, QSize, QRect, QPoint, QTimer, QEvent
 
 
 # -----------------------------------------------------------------------
@@ -249,6 +250,10 @@ class _CodeEdit(QPlainTextEdit):
         self.cursorPositionChanged.connect(self._repaint_current_line)
         self._update_margin()
 
+        # Autocomplete state
+        self._ac_popup = None   # _XmlCompleter, created lazily
+        self._ac_filter: str = ''
+
     # -------------------------------------------------------------------
     # Geometry helpers (unchanged)
     # -------------------------------------------------------------------
@@ -343,27 +348,104 @@ class _CodeEdit(QPlainTextEdit):
     # at the end of the line.
     # -------------------------------------------------------------------
     def keyPressEvent(self, event):
-        if event.text() == '>':
+        key  = event.key()
+        char = event.text()
+
+        # ── Autocomplete popup is open ──────────────────────────────────────
+        popup = self._ac_popup
+        if popup is not None and popup.isVisible():
+            if key == Qt.Key.Key_Escape:
+                popup.hide()
+                self._ac_filter = ''
+                return
+            if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Tab):
+                tag = popup.selected_tag()
+                if tag:
+                    self._complete_tag(tag)
+                else:
+                    popup.hide()
+                    self._ac_filter = ''
+                    super().keyPressEvent(event)
+                return
+            if key == Qt.Key.Key_Down:
+                popup.key_down()
+                return
+            if key == Qt.Key.Key_Up:
+                popup.key_up()
+                return
+            if key == Qt.Key.Key_Backspace:
+                super().keyPressEvent(event)
+                if self._ac_filter:
+                    self._ac_filter = self._ac_filter[:-1]
+                    popup.update_filter(self._ac_filter)
+                else:
+                    popup.hide()
+                return
+            if char and (char.isalnum() or char in '-_:'):
+                super().keyPressEvent(event)
+                self._ac_filter += char
+                popup.update_filter(self._ac_filter)
+                return
+            # Any other key (space, >, etc.) → dismiss popup and fall through
+            popup.hide()
+            self._ac_filter = ''
+
+        # ── Auto-close tag on '>' ───────────────────────────────────────────
+        if char == '>':
             cursor = self.textCursor()
-            block = cursor.block()
-            # text *up to* the cursor (including the character that will be inserted)
+            block  = cursor.block()
             line_up_to_cursor = block.text()[:cursor.positionInBlock()] + '>'
             m = self._OPEN_TAG_RE.search(line_up_to_cursor)
             if m and not line_up_to_cursor.rstrip().endswith('/>') \
                     and not line_up_to_cursor.lstrip().startswith('</'):
-                # Insert the '>' first (so the document updates)
                 super().keyPressEvent(event)
                 tag = m.group(1)
-                # Insert closing tag and place the caret inside it
                 c = self.textCursor()
                 c.insertText(f'</{tag}>')
-                # Move cursor left to sit **before** the closing tag
                 for _ in range(len(tag) + 3):
                     c.movePosition(QTextCursor.MoveOperation.Left,
                                    QTextCursor.MoveMode.MoveAnchor)
                 self.setTextCursor(c)
                 return
+
+        # ── Show autocomplete popup on '<' ──────────────────────────────────
+        if char == '<':
+            super().keyPressEvent(event)
+            self._ac_filter = ''
+            if self._ac_popup is None:
+                self._ac_popup = _XmlCompleter(self)
+            self._ac_popup.show_at_cursor('')
+            return
+
         super().keyPressEvent(event)
+
+    # -------------------------------------------------------------------
+    # Autocomplete helpers
+    # -------------------------------------------------------------------
+    def _complete_tag(self, tag: str):
+        """Replace the partial `<filter` typed so far with `<tag></tag>`."""
+        chars_to_remove = len(self._ac_filter) + 1   # filter chars + the '<'
+        cur = self.textCursor()
+        cur.movePosition(
+            QTextCursor.MoveOperation.Left,
+            QTextCursor.MoveMode.KeepAnchor,
+            chars_to_remove,
+        )
+        close_tag = f'</{tag}>'
+        cur.insertText(f'<{tag}>{close_tag}')
+        pos = cur.position() - len(close_tag)
+        cur.setPosition(pos)
+        self.setTextCursor(cur)
+        if self._ac_popup:
+            self._ac_popup.hide()
+        self._ac_filter = ''
+
+    def trigger_autocomplete(self):
+        """Manually open the tag-name autocomplete popup (Ctrl+Space)."""
+        if self._ac_popup is None:
+            self._ac_popup = _XmlCompleter(self)
+        self._ac_filter = ''
+        self._ac_popup.show_at_cursor('')
 
     # -------------------------------------------------------------------
     # Event filter – show validation error tooltip on hover
@@ -471,6 +553,122 @@ class _ValidationBar(QWidget):
     def set_error(self, line: int, col: int, msg: str):
         short = msg.split('\n')[0][:120]
         self._set_state('error', f'Line {line}, Col {col}: {short}')
+
+
+# -----------------------------------------------------------------------
+# XML autocomplete popup
+# -----------------------------------------------------------------------
+class _XmlCompleter(QFrame):
+    """Floating tag-name autocomplete that appears when the user types '<'.
+
+    The popup is a *child widget* of the ``_CodeEdit`` instance so it never
+    steals keyboard focus — the user keeps typing while the list updates.
+    """
+
+    ALL_TAGS = sorted([
+        # Common HTML/XML elements
+        'b', 'blockquote', 'br', 'code', 'hr', 'i', 'li', 'ol', 'p', 'pre',
+        's', 'section', 'table', 'td', 'th', 'title', 'tr', 'u', 'ul',
+        # Structo-specific elements
+        'inno-ref', 'innodFootnote', 'innodFootnoteRef', 'innodHeading',
+        'innodIdentifier', 'innodImg', 'innodLevel', 'innodMeta',
+        'innodReference', 'innodReplace', 'innodTable', 'innodTd', 'innodTr',
+    ])
+
+    # Minimal attribute hints for the most-used Structo tags
+    _ATTR_HINTS: dict = {
+        'innodReplace':     ['text', 'userEdit'],
+        'innodLevel':       ['level'],
+        'innodImg':         ['src'],
+        'innodFootnoteRef': ['fid', 'id', 'text'],
+        'inno-ref':         ['type', 'href'],
+        'section':          ['level', 'id'],
+        'table':            ['class', 'id'],
+    }
+
+    def __init__(self, editor: '_CodeEdit'):
+        super().__init__(editor)
+        self._editor = editor
+        self.setStyleSheet(
+            'QFrame{background:#1e1e2e;border:1px solid #45475a;border-radius:4px;}'
+        )
+        self.setFixedWidth(240)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(1, 1, 1, 1)
+        lay.setSpacing(0)
+
+        self._list = QListWidget()
+        self._list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._list.setStyleSheet(
+            'QListWidget{background:#1e1e2e;color:#cdd6f4;border:none;'
+            'font-family:Consolas;font-size:11px;}'
+            'QListWidget::item{padding:3px 10px;}'
+            'QListWidget::item:selected{background:#313244;color:#89dceb;}'
+            'QListWidget::item:hover{background:#2a2a3e;}'
+        )
+        self._list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        lay.addWidget(self._list)
+        self.hide()
+
+    # ── Public interface ────────────────────────────────────────────────
+    def show_at_cursor(self, filter_text: str = ''):
+        self._populate(filter_text)
+        if self._list.count() == 0:
+            self.hide()
+            return
+        rect = self._editor.cursorRect()
+        pt   = self._editor.viewport().mapTo(self._editor, rect.bottomLeft())
+        x = min(pt.x(), self._editor.width() - self.width() - 4)
+        y = pt.y() + 2
+        if y + self.height() > self._editor.height() - 4:
+            y = pt.y() - self.height() - rect.height() - 2
+        self.move(max(0, x), max(0, y))
+        self.show()
+        self.raise_()
+
+    def update_filter(self, text: str):
+        self._populate(text)
+        if self._list.count() == 0:
+            self.hide()
+        elif not self.isVisible():
+            self.show_at_cursor(text)
+
+    def key_down(self):
+        r = self._list.currentRow()
+        if r < self._list.count() - 1:
+            self._list.setCurrentRow(r + 1)
+
+    def key_up(self):
+        r = self._list.currentRow()
+        if r > 0:
+            self._list.setCurrentRow(r - 1)
+
+    def selected_tag(self) -> str:
+        item = self._list.currentItem()
+        return item.text() if item else ''
+
+    # ── Private ─────────────────────────────────────────────────────────
+    def _populate(self, filter_text: str):
+        self._list.clear()
+        fl = filter_text.lower()
+        # Prefix matches first, then contains-only matches
+        prefix  = [t for t in self.ALL_TAGS if t.lower().startswith(fl)]
+        contain = [t for t in self.ALL_TAGS
+                   if fl and fl in t.lower() and not t.lower().startswith(fl)]
+        ordered = (prefix + contain) if fl else self.ALL_TAGS
+        for tag in ordered:
+            item = QListWidgetItem(tag)
+            hints = self._ATTR_HINTS.get(tag)
+            if hints:
+                item.setToolTip('Attrs: ' + ', '.join(hints))
+            self._list.addItem(item)
+        if self._list.count() > 0:
+            self._list.setCurrentRow(0)
+        n = min(self._list.count(), 10)
+        row_h = self._list.sizeHintForRow(0) if self._list.count() > 0 else 22
+        self.setFixedHeight(n * row_h + 2)
 
 
 # -----------------------------------------------------------------------
@@ -622,16 +820,16 @@ class _ShortcutsDialog(QDialog):
             ('Alt+U',          'Wrap selection with &lt;u&gt; (Underline)'),
             ('Alt+S',          'Wrap selection with &lt;s&gt; (Strikethrough)'),
         ])
-        html += _section('Structure (block tags)', [
-            ('Alt+P',          'Wrap with &lt;p&gt; (Paragraph)'),
-            ('Alt+L',          'Wrap with &lt;li&gt; (List item)'),
-            ('Alt+Q',          'Wrap with &lt;blockquote&gt; (Quote)'),
-            ('Alt+H',          'Wrap with &lt;h&gt; (Heading)'),
-            ('Alt+F',          'Wrap with &lt;fn&gt; (Footnote)'),
-            ('Alt+T',          'Wrap with &lt;table&gt; (Table)'),
-            ('Alt+M',          'Wrap with &lt;meta&gt; (Metadata)'),
-            ('Alt+6',          'Wrap with &lt;h1&gt; (Heading level 1)'),
-            ('Alt+7',          'Wrap with &lt;h2&gt; (Heading level 2)'),
+        html += _section('Structo structure templates', [
+            ('Alt+P',          'Insert &lt;innodReplace&gt; + &lt;p&gt; paragraph'),
+            ('Alt+L',          'Insert full &lt;innodLevel&gt; / &lt;section&gt; template'),
+            ('Alt+Q',          'Insert &lt;innodIdentifier&gt;'),
+            ('Alt+H',          'Insert &lt;innodHeading&gt;'),
+            ('Alt+F',          'Insert &lt;innodFootnoteRef&gt; template'),
+            ('Alt+M',          'Insert &lt;innodImg&gt; template'),
+            ('Alt+6',          'Insert 4-column &lt;innodTable&gt; template'),
+            ('Alt+7',          'Insert &lt;inno-ref type="manual"&gt;'),
+            ('Ctrl+Space',     'Show XML tag autocomplete popup'),
         ])
         html += '</table>'
 
@@ -793,25 +991,19 @@ class XmlEditor(QWidget):
         QShortcut(QKeySequence('Ctrl+Shift+E'), self).activated.connect(
             lambda: self._wrap_with_tag('innodReplace', 'userEdit="true"'))
 
-        # ── WF2 parity: structure tag shortcuts ───────────────────────
-        QShortcut(QKeySequence('Alt+P'), self).activated.connect(
-            lambda: self._wrap_with_tag('p'))
-        QShortcut(QKeySequence('Alt+L'), self).activated.connect(
-            lambda: self._wrap_with_tag('li'))
-        QShortcut(QKeySequence('Alt+Q'), self).activated.connect(
-            lambda: self._wrap_with_tag('blockquote'))
-        QShortcut(QKeySequence('Alt+H'), self).activated.connect(
-            lambda: self._wrap_with_tag('h'))
-        QShortcut(QKeySequence('Alt+F'), self).activated.connect(
-            lambda: self._wrap_with_tag('fn'))
-        QShortcut(QKeySequence('Alt+T'), self).activated.connect(
-            lambda: self._wrap_with_tag('table'))
-        QShortcut(QKeySequence('Alt+M'), self).activated.connect(
-            lambda: self._wrap_with_tag('meta'))
-        QShortcut(QKeySequence('Alt+6'), self).activated.connect(
-            lambda: self._wrap_with_tag('h1'))
-        QShortcut(QKeySequence('Alt+7'), self).activated.connect(
-            lambda: self._wrap_with_tag('h2'))
+        # ── WF2 parity: Structo structure templates ───────────────────
+        QShortcut(QKeySequence('Alt+P'), self).activated.connect(self._tpl_paragraph)
+        QShortcut(QKeySequence('Alt+L'), self).activated.connect(self._tpl_level)
+        QShortcut(QKeySequence('Alt+Q'), self).activated.connect(self._tpl_identifier)
+        QShortcut(QKeySequence('Alt+H'), self).activated.connect(self._tpl_heading)
+        QShortcut(QKeySequence('Alt+F'), self).activated.connect(self._tpl_footnote_ref)
+        QShortcut(QKeySequence('Alt+M'), self).activated.connect(self._tpl_image)
+        QShortcut(QKeySequence('Alt+6'), self).activated.connect(self._tpl_table)
+        QShortcut(QKeySequence('Alt+7'), self).activated.connect(self._tpl_manual_ref)
+
+        # ── Ctrl+Space: manually trigger XML autocomplete ─────────────
+        QShortcut(QKeySequence('Ctrl+Space'), self).activated.connect(
+            self._edit.trigger_autocomplete)
 
         # Find‑replace dialog lives lazily
         self._find_dlg: _FindReplaceDialog | None = None
@@ -948,6 +1140,118 @@ class XmlEditor(QWidget):
             cur.setPosition(pos)
             self._edit.setTextCursor(cur)
         cur.endEditBlock()
+
+    # -------------------------------------------------------------------
+    # Template insertion helpers (WF2 Structo parity)
+    # -------------------------------------------------------------------
+    def _insert_template(self, template: str):
+        """Insert *template* at the cursor.
+
+        A single ``|`` character marks the desired caret position after
+        insertion.  If there is no ``|``, the caret is left at the end.
+        """
+        if '|' in template:
+            idx    = template.index('|')
+            before = template[:idx]
+            after  = template[idx + 1:]
+            text   = before + after
+            offset = len(after)
+        else:
+            text   = template
+            offset = 0
+
+        cur = self._edit.textCursor()
+        cur.beginEditBlock()
+        cur.insertText(text)
+        if offset:
+            cur.setPosition(cur.position() - offset)
+            self._edit.setTextCursor(cur)
+        cur.endEditBlock()
+
+    def _tpl_paragraph(self):
+        self._insert_template(
+            '<innodReplace text="&#10;&#10;">\n'
+            '               </innodReplace><p>|</p>'
+        )
+
+    def _tpl_level(self):
+        self._insert_template(
+            '<innodReplace>\n'
+            '</innodReplace>\n'
+            '<innodLevel level="">\n'
+            '  <section level="">\n'
+            '    <innodReplace>\n'
+            '    </innodReplace>\n'
+            '    <innodHeading>\n'
+            '      <title>|</title>\n'
+            '    </innodHeading>\n'
+            '    <innodReplace text=" ">\n'
+            '    </innodReplace>\n'
+            '    <p></p>\n'
+            '    <innodReplace>\n'
+            '    </innodReplace>\n'
+            '  </section>\n'
+            '</innodLevel>'
+        )
+
+    def _tpl_identifier(self):
+        self._insert_template('<innodIdentifier>|</innodIdentifier>')
+
+    def _tpl_heading(self):
+        self._insert_template('<innodHeading>|</innodHeading>')
+
+    def _tpl_footnote_ref(self):
+        self._insert_template(
+            '<innodFootnoteRef fid="|" id="" text="">\n'
+            '    <footnoteref fid=""></footnoteref>\n'
+            '</innodFootnoteRef>'
+        )
+
+    def _tpl_image(self):
+        self._insert_template(
+            '<innodReplace>\n'
+            '</innodReplace>\n'
+            '<innodImg src="/Images/innodDOCid/img-1.png">\n'
+            '    <img src="images/img-1.png" />\n'
+            '</innodImg>|'
+        )
+
+    def _tpl_table(self):
+        self._insert_template(
+            '<innodTable><table>\n'
+            '<innodTr><tr>\n'
+            '<innodTd><th>\n'
+            '<p>|</p>\n'
+            '</th></innodTd>\n'
+            '<innodTd><th>\n'
+            '<p></p>\n'
+            '</th></innodTd>\n'
+            '<innodTd><th>\n'
+            '<p></p>\n'
+            '</th></innodTd>\n'
+            '<innodTd><th>\n'
+            '<p></p>\n'
+            '</th></innodTd>\n'
+            '</tr></innodTr>\n'
+            '<innodTr><tr>\n'
+            '<innodTd><td>\n'
+            '<p></p>\n'
+            '</td></innodTd>\n'
+            '<innodTd><td>\n'
+            '<p></p>\n'
+            '</td></innodTd>\n'
+            '<innodTd><td>\n'
+            '<p></p>\n'
+            '</td></innodTd>\n'
+            '<innodTd><td>\n'
+            '<p></p>\n'
+            '</td></innodTd>\n'
+            '</tr></innodTr>\n'
+            '</table></innodTable>'
+        )
+
+    def _tpl_manual_ref(self):
+        self._insert_template('<inno-ref type="manual" href="/us/irc/">|</inno-ref>')
 
     # -------------------------------------------------------------------
     # Public API: format (called by MainWindow Ctrl+S)
