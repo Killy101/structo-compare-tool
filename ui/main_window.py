@@ -1216,6 +1216,37 @@ class MainWindow(QMainWindow):
         self.btn_prev_change.setEnabled(n > 0)
         self.btn_next_change.setEnabled(n > 0)
 
+    def _scroll_to_change(self, kind: str, anchor: str):
+        """Scroll both panels to *anchor* without sync-scroll interference.
+
+        Each call to scroll_to_anchor() fires a scrollbar valueChanged signal,
+        which the sync-scroll handlers pick up and use to re-position the OTHER
+        panel — undoing whatever the first scroll just did.  Holding
+        _scroll_syncing=True for the whole operation lets each panel reach its
+        own target independently; proportional mirroring is done manually for
+        del/add where only one panel carries the anchor.
+        """
+        prev = self._scroll_syncing
+        self._scroll_syncing = True
+        try:
+            if kind == 'del':
+                self.old_panel.scroll_to_anchor(anchor)
+                src_sb = self.old_panel.browser.verticalScrollBar()
+                dst_sb = self.new_panel.browser.verticalScrollBar()
+                if src_sb.maximum() > 0:
+                    dst_sb.setValue(int(src_sb.value() / src_sb.maximum() * dst_sb.maximum()))
+            elif kind == 'add':
+                self.new_panel.scroll_to_anchor(anchor)
+                src_sb = self.new_panel.browser.verticalScrollBar()
+                dst_sb = self.old_panel.browser.verticalScrollBar()
+                if src_sb.maximum() > 0:
+                    dst_sb.setValue(int(src_sb.value() / src_sb.maximum() * dst_sb.maximum()))
+            else:  # mod — both panels have an anchor for the same change id
+                self.old_panel.scroll_to_anchor(anchor)
+                self.new_panel.scroll_to_anchor(anchor)
+        finally:
+            self._scroll_syncing = prev
+
     def _goto_change(self, index: int):
         n = len(self._changes)
         if n == 0:
@@ -1226,13 +1257,7 @@ class MainWindow(QMainWindow):
         self._change_index = index % n
         ch = self._changes[self._change_index]
         anchor, kind = ch['id'], ch['kind']
-        if kind == 'del':
-            self.old_panel.scroll_to_anchor(anchor)
-        elif kind == 'add':
-            self.new_panel.scroll_to_anchor(anchor)
-        else:
-            self.old_panel.scroll_to_anchor(anchor)
-            self.new_panel.scroll_to_anchor(anchor)
+        self._scroll_to_change(kind, anchor)
         self._update_change_counter()
         label = {'del': 'Deleted', 'add': 'Added', 'mod': 'Modified'}.get(kind, 'Change')
         self._status.showMessage(
@@ -1649,17 +1674,7 @@ span.fmt-changed {
                     f'Change {i + 1} of {n}  ·  {label}')
                 break
 
-        # Route to the correct panel(s):
-        #   del → only old panel has the anchor
-        #   add → only new panel has the anchor
-        #   mod → both panels
-        if kind == 'del':
-            self.old_panel.scroll_to_anchor(anchor)
-        elif kind == 'add':
-            self.new_panel.scroll_to_anchor(anchor)
-        else:
-            self.old_panel.scroll_to_anchor(anchor)
-            self.new_panel.scroll_to_anchor(anchor)
+        self._scroll_to_change(kind, anchor)
 
     # ── Save-status indicator ──────────────────────────────────────────────────
     def _set_saved_state(self, text: str, color: str = '#6c7086'):
