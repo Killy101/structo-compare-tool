@@ -597,7 +597,6 @@ class MainWindow(QMainWindow):
         self.btn_recompare  = _btn('⟳ Re-Compare', '#059669', '#047857')
         self.btn_view       = _btn('PDF Page View',  '#64748b', '#475569')
         self.btn_export     = _btn('Export ▾',       '#2563eb', '#1d4ed8')
-        self.btn_save       = _btn('Save XML As…',   '#dc2626', '#b91c1c')
 
         self.btn_recompare.setToolTip(
             'Re-run the comparison from the (edited) panel text  ·  Ctrl+R')
@@ -685,10 +684,8 @@ class MainWindow(QMainWindow):
         tb.addWidget(self._zoom_lbl)
         tb.addWidget(self.btn_zoom_in)
         tb.addWidget(_sep())
-        tb.addWidget(self.btn_export)
-        tb.addWidget(_sep())
         tb.addWidget(self._save_status)
-        tb.addWidget(self.btn_save)
+        tb.addWidget(self.btn_export)
         tb.addWidget(_sep())
         tb.addWidget(self.btn_back)
         root.addWidget(toolbar)
@@ -902,7 +899,6 @@ class MainWindow(QMainWindow):
         self.btn_back.clicked.connect(self._go_to_upload)
         self.btn_view.clicked.connect(self._toggle_view)
         self.btn_recompare.clicked.connect(self._recompare)
-        self.btn_save.clicked.connect(self._save_xml)
         self._build_export_menu()
 
         # Change navigation
@@ -1250,6 +1246,7 @@ class MainWindow(QMainWindow):
     def _build_export_menu(self):
         from PySide6.QtWidgets import QMenu
         menu = QMenu(self)
+        menu.addAction('Save Final XML…', self._save_xml)
         menu.addAction('Save Explanation HTML…', self._export_html)
         self.btn_export.setMenu(menu)
 
