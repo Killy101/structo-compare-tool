@@ -6,7 +6,7 @@ from lxml import etree  # type: ignore[attr-defined]  # C-extension, no stubs
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPlainTextEdit, QTextEdit, QTextBrowser, QSplitter,
-    QPushButton, QLabel, QLineEdit, QCheckBox,
+    QPushButton, QLabel, QLineEdit, QCheckBox, QFrame,
     QListWidget, QListWidgetItem,
     QMessageBox, QInputDialog, QScrollArea, QDialog, QToolTip,
 )
