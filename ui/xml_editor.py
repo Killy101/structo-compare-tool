@@ -437,7 +437,7 @@ class _CodeEdit(QPlainTextEdit):
         tag_name = m.group(2)
 
         fmt = QTextCharFormat()
-        fmt.setBackground(QColor('#fce7f3'))
+        fmt.setBackground(QColor('#fca5a5'))
 
         def _sel(start: int, end: int) -> QTextEdit.ExtraSelection:
             s = QTextEdit.ExtraSelection()

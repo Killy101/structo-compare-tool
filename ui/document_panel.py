@@ -197,6 +197,16 @@ class DocumentPanel(QWidget):
         if cursor:
             self.browser.setTextCursor(cursor)
             self.browser.ensureCursorVisible()
+            # Centre the target line in the viewport so the user doesn't
+            # have to hunt for a highlight that's just barely on-screen.
+            sb       = self.browser.verticalScrollBar()
+            vp_h     = self.browser.viewport().height()
+            rect     = self.browser.cursorRect(cursor)
+            # rect.y() is in viewport coords after ensureCursorVisible;
+            # absolute document position = current scroll + rect.y()
+            abs_top  = sb.value() + rect.y()
+            centered = abs_top - vp_h // 2 + rect.height() // 2
+            sb.setValue(max(0, min(centered, sb.maximum())))
             self._flash(cursor)
 
     # -------------------------------------------------------------------
