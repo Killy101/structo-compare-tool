@@ -559,11 +559,6 @@ class _UploadPage(QWidget):
             ox = (w - scaled.width())  // 2
             oy = (h - scaled.height()) // 2
             p.drawPixmap(ox, oy, scaled)
-            # Subtle dark vignette so the card reads clearly
-            vgn = QRadialGradient(QPointF(w / 2, h / 2), max(w, h) * 0.75)
-            vgn.setColorAt(0.0, QColor(0, 0, 0, 0))
-            vgn.setColorAt(1.0, QColor(0, 0, 0, 140))
-            p.fillRect(self.rect(), vgn)
             p.end()
             return
 
