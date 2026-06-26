@@ -111,7 +111,8 @@ def extract_pdf(path: str, progress_cb=None) -> Document:
     pdf = fitz.open(path)
     total_pages = len(pdf)
 
-    for page_num, page in enumerate(pdf):
+    for page_num in range(total_pages):
+        page = pdf[page_num]
         # Yield the GIL every 20 pages so the main-thread event loop stays
         # responsive even when processing very large documents.
         if page_num % 20 == 0:
