@@ -195,8 +195,8 @@ class _UploadPage(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
 
         outer = QVBoxLayout(self)
-        outer.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        outer.setContentsMargins(20, 20, 20, 20)
+        outer.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        outer.setContentsMargins(60, 20, 20, 20)
 
         card = QWidget()
         card.setFixedWidth(660)
