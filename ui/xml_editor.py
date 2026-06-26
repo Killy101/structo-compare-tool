@@ -105,6 +105,91 @@ _PREVIEW_CSS = """
 </style>
 """
 
+_PREVIEW_CSS_DARK = """
+<style>
+  body {
+    font-family: Arial, sans-serif;
+    font-size: 13px;
+    line-height: 1.7;
+    color: #cdd6f4;
+    background: #1e1e2e;
+    padding: 16px 20px;
+    margin: 0;
+  }
+  h1 { font-size: 18px; font-weight: bold; margin: 12px 0 4px; color: #b4befe; }
+  h2 { font-size: 15px; font-weight: bold; margin: 8px 0 3px; color: #cdd6f4; }
+  h3 { font-size: 13px; font-weight: bold; margin: 6px 0 2px; }
+  p  { margin: 4px 0; }
+  blockquote {
+    margin: 4px 0 4px 14px;
+    padding-left: 10px;
+    border-left: 3px solid #45475a;
+    color: #a6adc8;
+    font-style: italic;
+  }
+  table { border-collapse: collapse; margin: 6px 0; width: 100%; }
+  td, th { border: 1px solid #313244; padding: 4px 8px; }
+  th { background: #313244; font-weight: bold; }
+  .innodrep {
+    background: #3d2a00;
+    border: 1px solid #d97706;
+    border-radius: 3px;
+    padding: 1px 4px;
+  }
+  .innodrep-badge {
+    font-size: 9px;
+    background: #b45309;
+    color: #fef3c7;
+    border-radius: 2px;
+    padding: 0 3px;
+    margin-left: 3px;
+    vertical-align: middle;
+  }
+  .inno-identifier {
+    background: #172554;
+    color: #93c5fd;
+    border-radius: 3px;
+    padding: 0 5px;
+    font-size: 11px;
+    font-family: monospace;
+  }
+  .inno-ref {
+    color: #a5b4fc;
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  .fn-badge { color: #a5b4fc; font-size: 10px; vertical-align: super; }
+  .meta-badge {
+    background: #1e293b;
+    color: #94a3b8;
+    font-size: 10px;
+    border-radius: 3px;
+    padding: 0 4px;
+    font-style: italic;
+  }
+  .inno-ref-block {
+    border-bottom: 1px dashed #475569;
+    color: #94a3b8;
+  }
+  .xml-error {
+    background: #3d1a1a;
+    border: 1px solid #f38ba8;
+    border-radius: 6px;
+    padding: 12px 16px;
+    color: #f38ba8;
+    font-family: monospace;
+    font-size: 12px;
+  }
+  .preview-empty {
+    color: #6c7086;
+    font-style: italic;
+    text-align: center;
+    margin-top: 40px;
+  }
+  .level-block { margin-left: 12px; }
+</style>
+"""
+
 # Tags whose content is passed through with no wrapping element
 _TRANSPARENT_TAGS = frozenset({
     'body', 'root', 'document', 'doc', 'content', 'text', 'xml',
@@ -119,23 +204,24 @@ _TRANSPARENT_TAGS = frozenset({
 })
 
 
-def _render_xml_preview(xml_text: str) -> str:
+def _render_xml_preview(xml_text: str, dark: bool = False) -> str:
     """Convert XML source to styled HTML for the live preview pane.
 
     Renders all Structo-specific tags (innodLevel, innodHeading, innodReplace,
     inno-ref, innodFootnoteRef, innodImg, etc.) as clean document content —
     no raw tag names are shown to the user.
     """
+    css = _PREVIEW_CSS_DARK if dark else _PREVIEW_CSS
     text = xml_text.strip()
     if not text:
-        return (_PREVIEW_CSS +
+        return (css +
                 '<body><p class="preview-empty">Start typing XML to see a live preview.</p></body>')
 
     try:
         root = etree.fromstring(text.encode('utf-8'))
     except etree.XMLSyntaxError as e:
         short = str(e).split('\n')[0][:300]
-        return (_PREVIEW_CSS +
+        return (css +
                 f'<body><div class="xml-error">'
                 f'<b>XML syntax error</b><br>{_html_mod.escape(short)}'
                 f'</div></body>')
@@ -298,7 +384,7 @@ def _render_xml_preview(xml_text: str) -> str:
     body_html = _node(root)
     if not body_html.strip():
         body_html = '<p class="preview-empty">Empty document.</p>'
-    return f'{_PREVIEW_CSS}<body>{body_html}</body>'
+    return f'{css}<body>{body_html}</body>'
 
 
 # -----------------------------------------------------------------------
@@ -331,6 +417,7 @@ class _CodeEdit(QPlainTextEdit):
         self._err_lines: set[int] = set()
         self._search_sels: list = []
         self._tag_pair_sels: list = []
+        self._dark = False
 
         # Debounced matching-tag update (heavy regex on large XML)
         self._tag_timer = QTimer(self)
@@ -356,11 +443,12 @@ class _CodeEdit(QPlainTextEdit):
 
     def _apply_extra_selections(self):
         sels = []
+        dark = self._dark
 
         # 1. Current-line highlight
         if not self.isReadOnly():
             sel = QTextEdit.ExtraSelection()
-            sel.format.setBackground(QColor('#f1f5f9'))
+            sel.format.setBackground(QColor('#313244' if dark else '#f1f5f9'))
             sel.format.setProperty(0x100000 + 1, True)   # FullWidthSelection
             sel.cursor = self.textCursor()
             sel.cursor.clearSelection()
@@ -371,7 +459,7 @@ class _CodeEdit(QPlainTextEdit):
             block = self.document().findBlockByNumber(ln)
             if block.isValid():
                 sel = QTextEdit.ExtraSelection()
-                sel.format.setBackground(QColor('#fee2e2'))
+                sel.format.setBackground(QColor('#4b1a1a' if dark else '#fee2e2'))
                 sel.format.setProperty(0x100000 + 1, True)
                 sel.cursor = QTextCursor(block)
                 sels.append(sel)
@@ -437,7 +525,7 @@ class _CodeEdit(QPlainTextEdit):
         tag_name = m.group(2)
 
         fmt = QTextCharFormat()
-        fmt.setBackground(QColor('#fca5a5'))
+        fmt.setBackground(QColor('#7f1d1d' if self._dark else '#fca5a5'))
 
         def _sel(start: int, end: int) -> QTextEdit.ExtraSelection:
             s = QTextEdit.ExtraSelection()
@@ -517,8 +605,9 @@ class _CodeEdit(QPlainTextEdit):
     # Line-number painting
     # -------------------------------------------------------------------
     def _paint_line_numbers(self, event):
+        dark = self._dark
         painter = QPainter(self._line_area)
-        painter.fillRect(event.rect(), QColor('#f1f5f9'))
+        painter.fillRect(event.rect(), QColor('#181825' if dark else '#f1f5f9'))
         painter.setFont(self.font())
 
         block  = self.firstVisibleBlock()
@@ -533,7 +622,7 @@ class _CodeEdit(QPlainTextEdit):
         while block.isValid() and top <= event.rect().bottom():
             if block.isVisible() and bottom >= event.rect().top():
                 has_err = num in self._err_lines
-                painter.setPen(QColor('#dc2626') if has_err else QColor('#94a3b8'))
+                painter.setPen(QColor('#f38ba8' if has_err else ('#6c7086' if dark else '#94a3b8')))
                 painter.drawText(
                     QRect(0, top, w - 5, fh),
                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
@@ -580,6 +669,7 @@ class _CodeEdit(QPlainTextEdit):
             self._ac_filter = ''
             if self._ac_popup is None:
                 self._ac_popup = _XmlCompleter(self)
+                self._ac_popup.set_dark(self._dark)
             self._ac_popup.show_at_cursor('')
             return
 
@@ -656,6 +746,7 @@ class _CodeEdit(QPlainTextEdit):
     def trigger_autocomplete(self):
         if self._ac_popup is None:
             self._ac_popup = _XmlCompleter(self)
+            self._ac_popup.set_dark(self._dark)
         self._ac_filter = ''
         self._ac_popup.show_at_cursor('')
 
@@ -674,6 +765,7 @@ class _CodeEdit(QPlainTextEdit):
         tag_part = m.group(1)
         if self._ac_popup is None:
             self._ac_popup = _XmlCompleter(self)
+            self._ac_popup.set_dark(self._dark)
         self._ac_filter = tag_part
         self._ac_popup.show_at_cursor(tag_part)
 
@@ -693,6 +785,17 @@ class _CodeEdit(QPlainTextEdit):
             return True
         return super().eventFilter(obj, event)
 
+    def set_dark(self, dark: bool):
+        self._dark = dark
+        if dark:
+            self.setStyleSheet('background:#1e1e2e;color:#cdd6f4;border:none;padding:8px;')
+        else:
+            self.setStyleSheet('background:#ffffff;color:#1e293b;border:none;padding:8px;')
+        self._apply_extra_selections()
+        self._line_area.update()
+        if self._ac_popup is not None:
+            self._ac_popup.set_dark(dark)
+
 
 # -----------------------------------------------------------------------
 # Syntax highlighter
@@ -700,7 +803,10 @@ class _CodeEdit(QPlainTextEdit):
 class _XmlHighlighter(QSyntaxHighlighter):
     def __init__(self, doc):
         super().__init__(doc)
+        self._rules = self._make_rules(dark=False)
 
+    @staticmethod
+    def _make_rules(dark: bool) -> list:
         def fmt(color, bold=False, italic=False):
             f = QTextCharFormat()
             f.setForeground(QColor(color))
@@ -708,16 +814,31 @@ class _XmlHighlighter(QSyntaxHighlighter):
             if italic: f.setFontItalic(True)
             return f
 
-        self._rules = [
-            (QRegularExpression(r'</?[\w:]+'),          fmt('#0451a5', bold=True)),
-            (QRegularExpression(r'/?>'),                 fmt('#0451a5', bold=True)),
-            (QRegularExpression(r'\b[\w:]+(?=\s*=)'),   fmt('#e50000')),
-            (QRegularExpression(r'"[^"]*"'),             fmt('#a31515')),
-            (QRegularExpression(r"'[^']*'"),             fmt('#a31515')),
-            (QRegularExpression(r'<!--.*?-->'),          fmt('#008000', italic=True)),
+        if dark:
+            return [
+                (QRegularExpression(r'</?[\w:]+'),           fmt('#569cd6', bold=True)),
+                (QRegularExpression(r'/?>'),                  fmt('#569cd6', bold=True)),
+                (QRegularExpression(r'\b[\w:]+(?=\s*=)'),    fmt('#9cdcfe')),
+                (QRegularExpression(r'"[^"]*"'),              fmt('#ce9178')),
+                (QRegularExpression(r"'[^']*'"),              fmt('#ce9178')),
+                (QRegularExpression(r'<!--.*?-->'),           fmt('#6a9955', italic=True)),
+                (QRegularExpression(r'<!\[CDATA\[.*?\]\]>'), fmt('#569cd6')),
+                (QRegularExpression(r'<\?.*?\?>'),            fmt('#c586c0')),
+            ]
+        return [
+            (QRegularExpression(r'</?[\w:]+'),           fmt('#0451a5', bold=True)),
+            (QRegularExpression(r'/?>'),                  fmt('#0451a5', bold=True)),
+            (QRegularExpression(r'\b[\w:]+(?=\s*=)'),    fmt('#e50000')),
+            (QRegularExpression(r'"[^"]*"'),              fmt('#a31515')),
+            (QRegularExpression(r"'[^']*'"),              fmt('#a31515')),
+            (QRegularExpression(r'<!--.*?-->'),           fmt('#008000', italic=True)),
             (QRegularExpression(r'<!\[CDATA\[.*?\]\]>'), fmt('#0451a5')),
-            (QRegularExpression(r'<\?.*?\?>'),           fmt('#af00db')),
+            (QRegularExpression(r'<\?.*?\?>'),            fmt('#af00db')),
         ]
+
+    def set_dark(self, dark: bool):
+        self._rules = self._make_rules(dark)
+        self.rehighlight()
 
     def highlightBlock(self, text: str):
         for pattern, fmt in self._rules:
@@ -745,22 +866,40 @@ class _ValidationBar(QWidget):
         self._msg.setFont(f)
         lay.addWidget(self._icon)
         lay.addWidget(self._msg, 1)
+        self._dark = False
+        self._cur_state = 'idle'
+        self._cur_text  = 'Open an XML file to begin editing.'
         self._set_state('idle')
 
     def _set_state(self, state: str, text: str = ''):
-        colors = {
-            'idle':  ('#94a3b8', '#f8fafc'),
-            'ok':    ('#059669', '#f0fdf4'),
-            'error': ('#dc2626', '#fef2f2'),
-            'empty': ('#94a3b8', '#f8fafc'),
-        }
-        fg, bg = colors.get(state, ('#858585', '#f8fafc'))
+        self._cur_state = state
+        self._cur_text  = text
+        if self._dark:
+            colors = {
+                'idle':  ('#6c7086', '#181825'),
+                'ok':    ('#a6e3a1', '#1a3a2a'),
+                'error': ('#f38ba8', '#3d1a1a'),
+                'empty': ('#6c7086', '#181825'),
+            }
+            fg, bg = colors.get(state, ('#6c7086', '#181825'))
+        else:
+            colors = {
+                'idle':  ('#94a3b8', '#f8fafc'),
+                'ok':    ('#059669', '#f0fdf4'),
+                'error': ('#dc2626', '#fef2f2'),
+                'empty': ('#94a3b8', '#f8fafc'),
+            }
+            fg, bg = colors.get(state, ('#858585', '#f8fafc'))
         icons  = {'idle': '—', 'ok': '✓', 'error': '✕', 'empty': '—'}
         self.setStyleSheet(f'background:{bg};')
         self._icon.setStyleSheet(f'color:{fg};font-weight:bold;')
         self._icon.setText(icons.get(state, '—'))
         self._msg.setStyleSheet(f'color:{fg};font-size:11px;')
         self._msg.setText(text)
+
+    def set_dark(self, dark: bool):
+        self._dark = dark
+        self._set_state(self._cur_state, self._cur_text)
 
     def set_idle(self):  self._set_state('idle', 'Open an XML file to begin editing.')
     def set_empty(self): self._set_state('empty', 'Empty document.')
@@ -870,6 +1009,30 @@ class _XmlCompleter(QFrame):
         self._list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         lay.addWidget(self._list)
         self.hide()
+
+    def set_dark(self, dark: bool):
+        if dark:
+            self.setStyleSheet(
+                'QFrame{background:#1e1e2e;border:1px solid #45475a;border-radius:5px;}'
+            )
+            self._list.setStyleSheet(
+                'QListWidget{background:#1e1e2e;color:#cdd6f4;border:none;'
+                'font-family:Consolas,monospace;font-size:11px;}'
+                'QListWidget::item{padding:3px 10px;color:#cdd6f4;}'
+                'QListWidget::item:selected{background:#313244;color:#cba6f7;}'
+                'QListWidget::item:hover{background:#313244;}'
+            )
+        else:
+            self.setStyleSheet(
+                'QFrame{background:#ffffff;border:1px solid #cbd5e1;border-radius:5px;}'
+            )
+            self._list.setStyleSheet(
+                'QListWidget{background:#ffffff;color:#1e293b;border:none;'
+                'font-family:Consolas,monospace;font-size:11px;}'
+                'QListWidget::item{padding:3px 10px;color:#1e293b;}'
+                'QListWidget::item:selected{background:#ede9fe;color:#4f46e5;}'
+                'QListWidget::item:hover{background:#f1f5f9;}'
+            )
 
     def get_snippet(self, tag: str) -> str | None:
         return self._TAG_SNIPPETS.get(tag)
@@ -1086,6 +1249,34 @@ class _XmlSearchBar(QWidget):
         self._current = -1
         self._edit.setFocus()
 
+    def set_dark(self, dark: bool):
+        if dark:
+            btn_ss = (
+                'QPushButton{background:#313244;color:#cdd6f4;border:1px solid #45475a;'
+                'border-radius:3px;padding:2px 7px;font-size:11px;min-width:22px;}'
+                'QPushButton:hover{background:#45475a;color:#cdd6f4;}'
+                'QPushButton:checked{background:#4c1d95;color:#e9d5ff;border-color:#7c3aed;}'
+            )
+            input_ss = (
+                'QLineEdit{background:#313244;border:1px solid #45475a;border-radius:3px;'
+                'padding:2px 8px;font-size:11px;color:#cdd6f4;}'
+                'QLineEdit:focus{border-color:#7c3aed;outline:none;}'
+            )
+            self.setStyleSheet('background:#181825;border-bottom:1px solid #313244;')
+            self._repl_widget.setStyleSheet('background:transparent;')
+            self._count_lbl.setStyleSheet('color:#6c7086;font-size:11px;')
+        else:
+            btn_ss = self._BTN_SS
+            input_ss = self._INPUT_SS
+            self.setStyleSheet('background:#f8fafc;border-bottom:1px solid #e2e8f0;')
+            self._repl_widget.setStyleSheet('background:transparent;')
+            self._count_lbl.setStyleSheet('color:#64748b;font-size:11px;')
+        for b in (self._btn_expand, self._btn_prev, self._btn_next,
+                  self._btn_repl_one, self._btn_repl_all):
+            b.setStyleSheet(btn_ss)
+        self._input.setStyleSheet(input_ss)
+        self._repl_input.setStyleSheet(input_ss)
+
     # ── Search logic ──────────────────────────────────────────────────────
     def _on_text_changed(self, text: str):
         self._find_all(text)
@@ -1280,31 +1471,38 @@ class XmlEditor(QWidget):
     """XML editor with syntax highlighting, line numbers, live validation,
     inline find/replace, matching-tag navigation, and live preview."""
 
+    _TBTN_LIGHT = (
+        'QPushButton{background:#f1f5f9;color:#475569;border:1px solid #e2e8f0;'
+        'padding:3px 10px;border-radius:3px;font-size:11px;}'
+        'QPushButton:hover{background:#e2e8f0;color:#334155;}'
+        'QPushButton:checked{background:#ede9fe;color:#5b21b6;border-color:#c4b5fd;}'
+    )
+    _TBTN_DARK = (
+        'QPushButton{background:#313244;color:#cdd6f4;border:1px solid #45475a;'
+        'padding:3px 10px;border-radius:3px;font-size:11px;}'
+        'QPushButton:hover{background:#45475a;color:#cdd6f4;}'
+        'QPushButton:checked{background:#4c1d95;color:#e9d5ff;border-color:#7c3aed;}'
+    )
+
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._dark_mode = False
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
         # ── Toolbar ──────────────────────────────────────────────────────
-        toolbar = QWidget()
-        toolbar.setStyleSheet('background:#f8fafc;border-bottom:1px solid #e2e8f0;')
-        tb = QHBoxLayout(toolbar)
+        self._toolbar = QWidget()
+        self._toolbar.setStyleSheet('background:#f8fafc;border-bottom:1px solid #e2e8f0;')
+        tb = QHBoxLayout(self._toolbar)
         tb.setContentsMargins(6, 3, 6, 3)
         tb.setSpacing(4)
-
-        _TBTN = (
-            'QPushButton{background:#f1f5f9;color:#475569;border:1px solid #e2e8f0;'
-            'padding:3px 10px;border-radius:3px;font-size:11px;}'
-            'QPushButton:hover{background:#e2e8f0;color:#334155;}'
-            'QPushButton:checked{background:#ede9fe;color:#5b21b6;border-color:#c4b5fd;}'
-        )
 
         def _tbtn(label: str, tip: str, checkable: bool = False) -> QPushButton:
             b = QPushButton(label)
             b.setToolTip(tip)
             b.setCheckable(checkable)
-            b.setStyleSheet(_TBTN)
+            b.setStyleSheet(self._TBTN_LIGHT)
             return b
 
         self._btn_fmt     = _tbtn('Format XML',     'Pretty-print XML (Ctrl+Shift+F)')
@@ -1315,15 +1513,23 @@ class XmlEditor(QWidget):
         self._btn_undo    = _tbtn('↩ Undo',   'Ctrl+Z')
         self._btn_redo    = _tbtn('↪ Redo',   'Ctrl+Y')
         self._btn_preview = _tbtn('□ Preview', 'Toggle live preview (Ctrl+P)', checkable=True)
+        self._btn_theme   = _tbtn('🌙 Dark',   'Switch to dark mode', checkable=True)
         self._btn_help    = _tbtn('⌨ Shortcuts', 'Keyboard shortcuts (F1)')
+
+        self._toolbar_btns = [
+            self._btn_fmt, self._btn_find, self._btn_repl,
+            self._btn_goto, self._btn_cmt, self._btn_undo,
+            self._btn_redo, self._btn_preview, self._btn_theme, self._btn_help,
+        ]
 
         for btn in (self._btn_fmt, self._btn_find, self._btn_repl,
                     self._btn_goto, self._btn_cmt,
-                    self._btn_undo, self._btn_redo, self._btn_preview):
+                    self._btn_undo, self._btn_redo, self._btn_preview,
+                    self._btn_theme):
             tb.addWidget(btn)
         tb.addStretch()
         tb.addWidget(self._btn_help)
-        root.addWidget(toolbar)
+        root.addWidget(self._toolbar)
 
         # ── Inline Find / Replace bar ─────────────────────────────────────
         # Created before the editor so _search_bar can hold a reference to _edit
@@ -1394,6 +1600,7 @@ class XmlEditor(QWidget):
         self._btn_undo.clicked.connect(self._edit.undo)
         self._btn_redo.clicked.connect(self._edit.redo)
         self._btn_preview.clicked.connect(self._toggle_preview)
+        self._btn_theme.clicked.connect(self._toggle_theme)
         self._btn_help.clicked.connect(self._show_shortcuts)
 
         # ── Keyboard shortcuts ────────────────────────────────────────────
@@ -1651,6 +1858,40 @@ class XmlEditor(QWidget):
         self._format_xml()
 
     # -------------------------------------------------------------------
+    # Theme toggle
+    # -------------------------------------------------------------------
+    def _toggle_theme(self):
+        self._dark_mode = not self._dark_mode
+        dark = self._dark_mode
+
+        if dark:
+            self._toolbar.setStyleSheet('background:#181825;border-bottom:1px solid #313244;')
+            self._preview.setStyleSheet(
+                'background:#1e1e2e;border:none;border-left:1px solid #313244;'
+            )
+            self._btn_theme.setText('☀ Light')
+            self._btn_theme.setToolTip('Switch to light mode')
+        else:
+            self._toolbar.setStyleSheet('background:#f8fafc;border-bottom:1px solid #e2e8f0;')
+            self._preview.setStyleSheet(
+                'background:#ffffff;border:none;border-left:1px solid #e2e8f0;'
+            )
+            self._btn_theme.setText('🌙 Dark')
+            self._btn_theme.setToolTip('Switch to dark mode')
+
+        tbtn_ss = self._TBTN_DARK if dark else self._TBTN_LIGHT
+        for btn in self._toolbar_btns:
+            btn.setStyleSheet(tbtn_ss)
+
+        self._edit.set_dark(dark)
+        self._highlighter.set_dark(dark)
+        self._val_bar.set_dark(dark)
+        self._search_bar.set_dark(dark)
+
+        if self._preview.isVisible():
+            self._update_preview()
+
+    # -------------------------------------------------------------------
     # Live preview
     # -------------------------------------------------------------------
     def _toggle_preview(self):
@@ -1669,7 +1910,7 @@ class XmlEditor(QWidget):
         if not self._preview.isVisible():
             return
         xml_text = self._edit.toPlainText()
-        html     = _render_xml_preview(xml_text)
+        html     = _render_xml_preview(xml_text, dark=self._dark_mode)
         sb       = self._preview.verticalScrollBar()
         old_val  = sb.value()
         self._preview.setHtml(html)
