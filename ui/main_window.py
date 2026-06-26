@@ -191,28 +191,34 @@ _ROW_ERR   = ('QFrame{background:#fef2f2;border:2px solid #f87171;'
 class _UploadPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setStyleSheet('background:#f0f4f8;')
+        # paintEvent draws the gradient — no solid stylesheet background here.
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
 
         outer = QVBoxLayout(self)
         outer.setAlignment(Qt.AlignmentFlag.AlignCenter)
         outer.setContentsMargins(20, 20, 20, 20)
 
         card = QWidget()
-        card.setFixedWidth(640)
-        card.setStyleSheet(
-            'background:#ffffff;border-radius:16px;border:1px solid #e2e8f0;'
-        )
+        card.setFixedWidth(660)
+        card.setStyleSheet('background:#ffffff;border-radius:20px;border:none;')
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect
+        _shadow = QGraphicsDropShadowEffect(card)
+        _shadow.setBlurRadius(64)
+        _shadow.setColor(QColor(0, 0, 0, 180))
+        _shadow.setOffset(0, 14)
+        card.setGraphicsEffect(_shadow)
+
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(0, 0, 0, 36)
         card_layout.setSpacing(0)
 
         # ── Header band ───────────────────────────────────────────────────────
         header = QWidget()
-        header.setFixedHeight(96)
+        header.setFixedHeight(104)
         header.setStyleSheet(
-            'background:qlineargradient(x1:0,y1:0,x2:1,y2:1,'
-            'stop:0 #6366f1,stop:1 #0ea5e9);'
-            'border-radius:16px 16px 0 0;'
+            'background:qlineargradient(x1:0,y1:0,x2:1,y2:0,'
+            'stop:0 #6366f1,stop:0.45 #7c3aed,stop:1 #0ea5e9);'
+            'border-radius:20px 20px 0 0;'
         )
         hl = QVBoxLayout(header)
         hl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -520,6 +526,62 @@ class _UploadPage(QWidget):
         else:
             self._hint.setText('Select Old PDF and New PDF to enable comparison.')
 
+    # ── Custom gradient background ──────────────────────────────────────────
+    def paintEvent(self, event):
+        from PySide6.QtGui import QPainter, QLinearGradient, QRadialGradient
+        from PySide6.QtCore import QPointF
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+
+        # Dark background: slate → indigo → deep ocean
+        bg = QLinearGradient(0, 0, w, h)
+        bg.setColorAt(0.00, QColor('#0f172a'))   # slate-900
+        bg.setColorAt(0.50, QColor('#1e1b4b'))   # indigo-950
+        bg.setColorAt(1.00, QColor('#082f49'))   # sky-950
+        p.fillRect(self.rect(), bg)
+
+        p.setPen(Qt.PenStyle.NoPen)
+        R = max(w, h)
+
+        # Top-left indigo glow
+        r1 = QRadialGradient(QPointF(0, 0), R * 0.55)
+        r1.setColorAt(0.0, QColor(99, 102, 241, 90))
+        r1.setColorAt(1.0, QColor(99, 102, 241, 0))
+        p.setBrush(r1)
+        p.drawEllipse(QPointF(0, 0), R * 0.55, R * 0.55)
+
+        # Bottom-right sky glow
+        r2 = QRadialGradient(QPointF(w, h), R * 0.48)
+        r2.setColorAt(0.0, QColor(14, 165, 233, 75))
+        r2.setColorAt(1.0, QColor(14, 165, 233, 0))
+        p.setBrush(r2)
+        p.drawEllipse(QPointF(w, h), R * 0.48, R * 0.48)
+
+        # Top-right violet accent
+        r3 = QRadialGradient(QPointF(w * 0.88, h * 0.18), R * 0.28)
+        r3.setColorAt(0.0, QColor(167, 139, 250, 55))
+        r3.setColorAt(1.0, QColor(167, 139, 250, 0))
+        p.setBrush(r3)
+        p.drawEllipse(QPointF(w * 0.88, h * 0.18), R * 0.28, R * 0.28)
+
+        # Bottom-left emerald accent
+        r4 = QRadialGradient(QPointF(w * 0.12, h * 0.84), R * 0.22)
+        r4.setColorAt(0.0, QColor(52, 211, 153, 45))
+        r4.setColorAt(1.0, QColor(52, 211, 153, 0))
+        p.setBrush(r4)
+        p.drawEllipse(QPointF(w * 0.12, h * 0.84), R * 0.22, R * 0.22)
+
+        # Subtle dot grid
+        p.setPen(QColor(255, 255, 255, 14))
+        gap = 28
+        for xi in range(0, w + gap, gap):
+            for yi in range(0, h + gap, gap):
+                p.drawPoint(xi, yi)
+
+        p.end()
+
 
 # ---------------------------------------------------------------------------
 # Processing screen (page 1)
@@ -527,14 +589,20 @@ class _UploadPage(QWidget):
 class _ProcessingPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setStyleSheet('background:#f0f4f8;')
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
 
         outer = QVBoxLayout(self)
         outer.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         card = QWidget()
         card.setFixedWidth(480)
-        card.setStyleSheet('background:#ffffff;border-radius:12px;border:1px solid #e2e8f0;')
+        card.setStyleSheet('background:#ffffff;border-radius:16px;border:none;')
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect as _DSE
+        _sh = _DSE(card)
+        _sh.setBlurRadius(56)
+        _sh.setColor(QColor(0, 0, 0, 170))
+        _sh.setOffset(0, 12)
+        card.setGraphicsEffect(_sh)
         cl = QVBoxLayout(card)
         cl.setContentsMargins(40, 40, 40, 40)
         cl.setSpacing(18)
@@ -571,6 +639,36 @@ class _ProcessingPage(QWidget):
             self._bar.setValue(pct)
         else:
             self._bar.setRange(0, 0)   # indeterminate pulsing
+
+    def paintEvent(self, event):
+        from PySide6.QtGui import QPainter, QLinearGradient, QRadialGradient
+        from PySide6.QtCore import QPointF
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        bg = QLinearGradient(0, 0, w, h)
+        bg.setColorAt(0.00, QColor('#0f172a'))
+        bg.setColorAt(0.50, QColor('#1e1b4b'))
+        bg.setColorAt(1.00, QColor('#082f49'))
+        p.fillRect(self.rect(), bg)
+        p.setPen(Qt.PenStyle.NoPen)
+        R = max(w, h)
+        r1 = QRadialGradient(QPointF(0, 0), R * 0.55)
+        r1.setColorAt(0.0, QColor(99, 102, 241, 90))
+        r1.setColorAt(1.0, QColor(99, 102, 241, 0))
+        p.setBrush(r1)
+        p.drawEllipse(QPointF(0, 0), R * 0.55, R * 0.55)
+        r2 = QRadialGradient(QPointF(w, h), R * 0.48)
+        r2.setColorAt(0.0, QColor(14, 165, 233, 75))
+        r2.setColorAt(1.0, QColor(14, 165, 233, 0))
+        p.setBrush(r2)
+        p.drawEllipse(QPointF(w, h), R * 0.48, R * 0.48)
+        p.setPen(QColor(255, 255, 255, 14))
+        gap = 28
+        for xi in range(0, w + gap, gap):
+            for yi in range(0, h + gap, gap):
+                p.drawPoint(xi, yi)
+        p.end()
 
 
 # ---------------------------------------------------------------------------
