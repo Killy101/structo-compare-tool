@@ -1251,153 +1251,235 @@ class MainWindow(QMainWindow):
         self.btn_export.setMenu(menu)
 
     def _export_html(self):
-        if not self._old_diff_html:
+        if self._old_doc is None:
             self._status.showMessage('Run a comparison first before exporting.')
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, 'Export Comparison as HTML', '',
+            self, 'Save Explanation HTML', '',
             'HTML Files (*.html);;All Files (*)'
         )
         if not path:
             return
         try:
             with open(path, 'w', encoding='utf-8') as f:
-                f.write(self._build_export_html())
+                f.write(self._build_explanation_html())
             self._status.showMessage(f'Exported: {path}')
         except Exception as e:
             self._status.showMessage(f'Export error: {e}')
 
-    def _export_xml(self):
-        if not self._changes:
-            self._status.showMessage('No changes to export — run a comparison first.')
-            return
-        path, _ = QFileDialog.getSaveFileName(
-            self, 'Export Change List as XML', '',
-            'XML Files (*.xml);;All Files (*)'
-        )
-        if not path:
-            return
-        import xml.sax.saxutils as _sx
-        old_name = os.path.basename(self._old_path) if self._old_path else 'old'
-        new_name = os.path.basename(self._new_path) if self._new_path else 'new'
-        lines = ['<?xml version="1.0" encoding="UTF-8"?>',
-                 f'<comparison old="{_sx.quoteattr(old_name)[1:-1]}" '
-                 f'new="{_sx.quoteattr(new_name)[1:-1]}" '
-                 f'changes="{len(self._changes)}">']
-        for ch in self._changes:
-            lines.append(f'  <change id="{ch["id"]}" type="{ch["kind"]}">')
-            if ch['old']:
-                lines.append(f'    <old>{_sx.escape(ch["old"])}</old>')
-            if ch['new']:
-                lines.append(f'    <new>{_sx.escape(ch["new"])}</new>')
-            lines.append('  </change>')
-        lines.append('</comparison>')
+    def _xml_paragraphs(self) -> list:
+        """Extract plain-text paragraphs from the XML editor content.
+
+        Walks the lxml tree and collects all text nodes, collapsing each
+        leaf block (p, innodReplace, heading-like elements, list items) into
+        one entry.  Returns an empty list when the editor is blank or the
+        XML is not parseable.
+        """
+        raw = self.xml_editor.toPlainText().strip()
+        if not raw:
+            return []
         try:
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write('\n'.join(lines))
-            self._status.showMessage(f'Exported {len(self._changes)} changes: {path}')
-        except Exception as e:
-            self._status.showMessage(f'Export error: {e}')
+            from lxml import etree as _et
+            root = _et.fromstring(raw.encode('utf-8'))
+        except Exception:
+            try:
+                from lxml import etree as _et
+                raw_wrapped = f'<root>{raw}</root>'
+                root = _et.fromstring(raw_wrapped.encode('utf-8'))
+            except Exception:
+                return []
 
-    def _export_pdf_report(self):
-        if not self._changes and not self._old_diff_html:
-            self._status.showMessage('Run a comparison first before exporting.')
-            return
-        path, _ = QFileDialog.getSaveFileName(
-            self, 'Export PDF Report', '',
-            'PDF Files (*.pdf);;All Files (*)'
-        )
-        if not path:
-            return
+        _BLOCK_TAGS = frozenset({
+            'p', 'para', 'paragraph', 'heading', 'h', 'h1', 'h2', 'h3',
+            'h4', 'h5', 'h6', 'title', 'li', 'item', 'innodheading',
+            'innodreplace',
+        })
+
+        paragraphs = []
+
+        def _collect_text(el):
+            parts = []
+            if el.text:
+                parts.append(el.text.strip())
+            for child in el:
+                local = (child.tag.split('}', 1)[-1] if '}' in child.tag
+                         else child.tag).lower()
+                if local in _BLOCK_TAGS:
+                    txt = ' '.join(child.itertext()).strip()
+                    if txt:
+                        paragraphs.append(txt)
+                    if child.tail and child.tail.strip():
+                        parts.append(child.tail.strip())
+                else:
+                    sub = ' '.join(child.itertext()).strip()
+                    if sub:
+                        parts.append(sub)
+                    if child.tail and child.tail.strip():
+                        parts.append(child.tail.strip())
+            return ' '.join(p for p in parts if p)
+
+        def _walk(el):
+            local = (el.tag.split('}', 1)[-1] if '}' in el.tag
+                     else el.tag).lower()
+            if local in _BLOCK_TAGS:
+                txt = ' '.join(el.itertext()).strip()
+                if txt:
+                    paragraphs.append(txt)
+            else:
+                txt = _collect_text(el)
+                if txt and not any(c for c in el if True):
+                    paragraphs.append(txt)
+                for child in el:
+                    _walk(child)
+
+        _walk(root)
+
+        # Fallback: if structured walk produced nothing, pull all text runs
+        if not paragraphs:
+            for line in ' '.join(root.itertext()).splitlines():
+                line = line.strip()
+                if line:
+                    paragraphs.append(line)
+
+        return [p for p in paragraphs if p]
+
+    def _xml_doc_path(self) -> str:
+        """Extract the document path from innodMeta tags in the XML editor."""
+        raw = self.xml_editor.toPlainText().strip()
+        if not raw:
+            return ''
         try:
-            from PySide6.QtGui import QPdfWriter, QPageSize
-            writer = QPdfWriter(path)
-            writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
-            doc = QTextDocument()
-            doc.setHtml(self._build_report_html())
-            doc.print_(writer)
-            self._status.showMessage(f'Exported PDF report: {path}')
-        except Exception as e:
-            self._status.showMessage(f'PDF export error: {e}')
+            from lxml import etree as _et
+            try:
+                root = _et.fromstring(raw.encode('utf-8'))
+            except Exception:
+                root = _et.fromstring(f'<root>{raw}</root>'.encode('utf-8'))
+            # Look for innodMeta with name containing 'path' or 'url'
+            for el in root.iter():
+                local = (el.tag.split('}', 1)[-1] if '}' in el.tag
+                         else el.tag).lower()
+                if local == 'innodmeta':
+                    name = (el.get('name') or '').lower()
+                    if 'path' in name or 'url' in name or 'href' in name:
+                        return el.get('value') or el.get('name') or ''
+        except Exception:
+            pass
+        return ''
 
-    def _build_report_html(self) -> str:
-        old_name = os.path.basename(self._old_path) if self._old_path else 'Old PDF'
-        new_name = os.path.basename(self._new_path) if self._new_path else 'New PDF'
-        from html import escape as _esc
-        counts = {'del': 0, 'add': 0, 'mod': 0}
-        for ch in self._changes:
-            counts[ch['kind']] = counts.get(ch['kind'], 0) + 1
-        rows = []
-        for i, ch in enumerate(self._changes, 1):
-            label = {'del': 'Deleted', 'add': 'Added', 'mod': 'Modified'}[ch['kind']]
-            old_c = f'<span style="color:#b91c1c">{_esc(ch["old"])}</span>' if ch['old'] else ''
-            new_c = f'<span style="color:#15803d">{_esc(ch["new"])}</span>' if ch['new'] else ''
-            rows.append(
-                f'<tr><td>{i}</td><td><b>{label}</b></td>'
-                f'<td>{old_c}</td><td>{new_c}</td></tr>')
-        table = ''.join(rows) or '<tr><td colspan="4">No changes detected.</td></tr>'
-        return f"""<html><body style="font-family:Arial,sans-serif;color:#1a1a1a">
-<h1 style="font-size:18px">Structo Compare Report</h1>
-<p style="font-size:12px;color:#475569">{_esc(old_name)} &rarr; {_esc(new_name)}</p>
-<p style="font-size:12px"><b>{counts['del']}</b> deleted &nbsp;
-<b>{counts['add']}</b> added &nbsp; <b>{counts['mod']}</b> modified &nbsp;
-(<b>{len(self._changes)}</b> total)</p>
-<table border="1" cellspacing="0" cellpadding="4" width="100%"
- style="font-size:11px;border-collapse:collapse">
-<tr style="background:#f1f5f9"><th>#</th><th>Type</th><th>Old</th><th>New</th></tr>
-{table}
-</table></body></html>"""
+    def _build_explanation_html(self) -> str:
+        """Build WF2-format explanation HTML comparing old PDF text vs XML editor content."""
+        import difflib
+        import html as _h
 
-    def _build_export_html(self) -> str:
-        old_name = os.path.basename(self._old_path) if self._old_path else 'Old PDF'
-        new_name = os.path.basename(self._new_path) if self._new_path else 'New PDF'
-        css = """
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: Arial, sans-serif; font-size: 13px;
-         color: #1a1a1a; background: #f0f0f0; }
-  h1 { font-size: 18px; padding: 14px 20px;
-       background: #1a1a2e; color: #edf2f4; letter-spacing: 1px; }
-  .legend { background: #f8f9fa; padding: 8px 20px; border-bottom: 1px solid #dee2e6;
-            display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  .chip { padding: 2px 10px; border-radius: 3px; font-size: 11px;
-          border: 1px solid rgba(0,0,0,.12); }
-  .panels { display: flex; gap: 0; height: calc(100vh - 90px); }
-  .panel { flex: 1; overflow-y: auto; background: #fff;
-           border-right: 1px solid #ddd; padding: 14px; }
-  .panel h2 { font-size: 12px; text-align: center; background: #2b2d42;
-              color: #edf2f4; padding: 6px; margin: -14px -14px 10px;
-              font-weight: bold; letter-spacing: .5px; }
-  p { margin: 3px 0; line-height: 1.6; }
-  span[style*="background:#ffb3b3"] { background:#ffb3b3; border-radius:3px; }
-  span[style*="background:#b3ffb3"] { background:#b3ffb3; border-radius:3px; }
-</style>"""
-        return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8"/>
-<title>Structo Compare — {old_name} vs {new_name}</title>
-{css}
-</head>
-<body>
-<h1>Structo Compare</h1>
-<div class="legend">
-  <b>Legend:</b>
-  <span class="chip" style="background:#ffb3b3">Removed</span>
-  <span class="chip" style="background:#b3ffb3">Added</span>
-</div>
-<div class="panels">
-  <div class="panel">
-    <h2>Old — {old_name}</h2>
-    {self._old_diff_html}
-  </div>
-  <div class="panel">
-    <h2>New — {new_name}</h2>
-    {self._new_diff_html}
-  </div>
-</div>
-</body>
-</html>"""
+        def _para_text(block):
+            return ' '.join(sp.text for sp in block.spans).strip()
+
+        old_paras = [_para_text(b) for b in self._old_doc.blocks
+                     if not b.is_blank() and _para_text(b)]
+
+        xml_paras = self._xml_paragraphs()
+        if xml_paras:
+            new_paras = xml_paras
+        elif self._new_doc is not None:
+            new_paras = [_para_text(b) for b in self._new_doc.blocks
+                         if not b.is_blank() and _para_text(b)]
+        else:
+            new_paras = old_paras[:]
+
+        def _word_spans(old_t, new_t):
+            old_w = old_t.split()
+            new_w = new_t.split()
+            m = difflib.SequenceMatcher(None, old_w, new_w, autojunk=False)
+            parts = []
+            for tag, i1, i2, j1, j2 in m.get_opcodes():
+                if tag == 'equal':
+                    for w in old_w[i1:i2]:
+                        parts.append(f'<span class="unchanged">{_h.escape(w)}</span> ')
+                elif tag == 'insert':
+                    for w in new_w[j1:j2]:
+                        parts.append(f'<span class="inserted">{_h.escape(w)}</span>')
+                elif tag == 'delete':
+                    for w in old_w[i1:i2]:
+                        parts.append(f'<span class="deleted">{_h.escape(w)}</span>')
+                else:  # replace
+                    for w in old_w[i1:i2]:
+                        parts.append(f'<span class="deleted">{_h.escape(w)}</span>')
+                    for w in new_w[j1:j2]:
+                        parts.append(f'<span class="inserted">{_h.escape(w)}</span>')
+            return ''.join(parts)
+
+        # Build path line from document path + title paragraph
+        doc_path = self._xml_doc_path()
+        old_title = old_paras[0] if old_paras else ''
+        new_title = new_paras[0] if new_paras else ''
+
+        if doc_path:
+            prefix = f'<span class="unchanged">{_h.escape(doc_path)}</span> '
+        else:
+            prefix = ''
+
+        if old_title == new_title:
+            title_spans = f'<span class="unchanged">{_h.escape(old_title)}</span>'
+        else:
+            title_spans = _word_spans(old_title, new_title)
+
+        path_html = f'<p class="path">{prefix}{title_spans} </p>\n'
+
+        # Paragraph-level diff on body (everything after title)
+        old_body = old_paras[1:]
+        new_body = new_paras[1:]
+        body_parts = []
+
+        for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+                None, old_body, new_body, autojunk=False).get_opcodes():
+            if tag == 'equal':
+                for p in old_body[i1:i2]:
+                    body_parts.append(f'<p class="unchanged">{_h.escape(p)}</p>\n')
+            elif tag == 'insert':
+                for p in new_body[j1:j2]:
+                    body_parts.append(f'<p class="inserted">{_h.escape(p)}</p>\n')
+            elif tag == 'delete':
+                for p in old_body[i1:i2]:
+                    body_parts.append(f'<p class="deleted">{_h.escape(p)}</p>\n')
+            else:  # replace — word-level diff per paired paragraph
+                og = old_body[i1:i2]
+                ng = new_body[j1:j2]
+                for k in range(max(len(og), len(ng))):
+                    if k < len(og) and k < len(ng):
+                        if og[k] == ng[k]:
+                            body_parts.append(
+                                f'<p class="unchanged">{_h.escape(og[k])}</p>\n')
+                        else:
+                            body_parts.append(
+                                f'<p>{_word_spans(og[k], ng[k])} </p>\n')
+                    elif k < len(og):
+                        body_parts.append(
+                            f'<p class="deleted">{_h.escape(og[k])}</p>\n')
+                    else:
+                        body_parts.append(
+                            f'<p class="inserted">{_h.escape(ng[k])}</p>\n')
+
+        css = (
+            'div {\n    margin: 1em;\n    padding: 1em;\n}\n\n'
+            'div.addition {\n    border: 10pt solid lightgreen;\n}\n\n'
+            'div.removal {\n    border: 10pt solid lightpink;\n}\n\n'
+            'div.modification {\n    border: 10pt solid yellow;\n}\n\n'
+            'div.modification.path {\n    border: 10pt solid blue;\n}\n\n'
+            'div.modification.path-content {\n    border: 10pt solid magenta;\n}\n\n'
+            'p.path {\n    background-color: white;\n    font-weight: bold;\n'
+            '    font-family: monospace;\n}\n\n'
+            '.inserted {\n    background-color: greenyellow;\n}\n\n'
+            '.deleted {\n    background-color: hotpink;\n'
+            '    text-decoration: line-through;\n}'
+        )
+
+        return (
+            "<?xml version='1.0' encoding='utf-8'?>\n"
+            f'<html><head><style>\n{css}\n</style></head><body>'
+            f'<div class="modification path-content">{path_html}\n'
+            f'{"".join(body_parts)}\n'
+            f'</div></body></html>'
+        )
 
     # ── Sync scroll ───────────────────────────────────────────────────────────
     def _on_sync_toggled(self, checked: bool):
