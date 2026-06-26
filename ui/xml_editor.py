@@ -552,6 +552,38 @@ class _CodeEdit(QPlainTextEdit):
         key  = event.key()
         char = event.text()
 
+        # ---- 1. Auto-close tag on '>' ----------------------------------------
+        # Handled first so popup state never suppresses it.
+        if char == '>':
+            if self._ac_popup and self._ac_popup.isVisible():
+                self._ac_popup.hide()
+                self._ac_filter = ''
+            cursor = self.textCursor()
+            line_up_to = cursor.block().text()[:cursor.positionInBlock()] + '>'
+            m = self._OPEN_TAG_RE.search(line_up_to)
+            if m and not line_up_to.rstrip().endswith('/>') \
+                    and not line_up_to.lstrip().startswith('</'):
+                super().keyPressEvent(event)
+                tag   = m.group(1)
+                c     = self.textCursor()
+                close = f'</{tag}>'
+                c.insertText(close)
+                c.setPosition(c.position() - len(close))
+                self.setTextCursor(c)
+                return
+            super().keyPressEvent(event)
+            return
+
+        # ---- 2. Show autocomplete on '<' -------------------------------------
+        if char == '<':
+            super().keyPressEvent(event)
+            self._ac_filter = ''
+            if self._ac_popup is None:
+                self._ac_popup = _XmlCompleter(self)
+            self._ac_popup.show_at_cursor('')
+            return
+
+        # ---- 3. Popup navigation when popup is visible ----------------------
         popup = self._ac_popup
         if popup is not None and popup.isVisible():
             if key == Qt.Key.Key_Escape:
@@ -583,34 +615,12 @@ class _CodeEdit(QPlainTextEdit):
                 return
             popup.hide(); self._ac_filter = ''
 
-        # Auto-close tag on '>'
-        if char == '>':
-            cursor = self.textCursor()
-            block  = cursor.block()
-            line_up_to = block.text()[:cursor.positionInBlock()] + '>'
-            m = self._OPEN_TAG_RE.search(line_up_to)
-            if m and not line_up_to.rstrip().endswith('/>') \
-                    and not line_up_to.lstrip().startswith('</'):
-                super().keyPressEvent(event)
-                tag = m.group(1)
-                c   = self.textCursor()
-                c.insertText(f'</{tag}>')
-                for _ in range(len(tag) + 3):
-                    c.movePosition(QTextCursor.MoveOperation.Left,
-                                   QTextCursor.MoveMode.MoveAnchor)
-                self.setTextCursor(c)
-                return
-
-        # Show autocomplete on '<'
-        if char == '<':
-            super().keyPressEvent(event)
-            self._ac_filter = ''
-            if self._ac_popup is None:
-                self._ac_popup = _XmlCompleter(self)
-            self._ac_popup.show_at_cursor('')
-            return
-
+        # ---- 4. Default + autocomplete re-trigger ----------------------------
         super().keyPressEvent(event)
+        # Re-open popup when typing inside a <tag_name context (handles the
+        # case where the user dismissed the popup then kept typing letters).
+        if char and (char.isalnum() or char in '-_:.'):
+            self._try_reopen_popup()
 
     # -------------------------------------------------------------------
     # Autocomplete helpers
@@ -648,6 +658,24 @@ class _CodeEdit(QPlainTextEdit):
             self._ac_popup = _XmlCompleter(self)
         self._ac_filter = ''
         self._ac_popup.show_at_cursor('')
+
+    def _try_reopen_popup(self):
+        """Show autocomplete when cursor is inside a <tag_name context.
+
+        Called after every ordinary keystroke so the popup re-appears even
+        if it was previously dismissed with Escape or hidden by a filter
+        with no results.
+        """
+        cur  = self.textCursor()
+        line = cur.block().text()[:cur.positionInBlock()]
+        m    = _re.search(r'<([A-Za-z_][\w:.-]*)$', line)
+        if not m:
+            return
+        tag_part = m.group(1)
+        if self._ac_popup is None:
+            self._ac_popup = _XmlCompleter(self)
+        self._ac_filter = tag_part
+        self._ac_popup.show_at_cursor(tag_part)
 
     # -------------------------------------------------------------------
     # Tooltip for error lines
