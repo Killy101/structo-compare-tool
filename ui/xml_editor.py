@@ -108,10 +108,14 @@ _PREVIEW_CSS = """
 # Tags whose content is passed through with no wrapping element
 _TRANSPARENT_TAGS = frozenset({
     'body', 'root', 'document', 'doc', 'content', 'text', 'xml',
-    'innodxml', 'innoddoc', 'article',
-    # Structo structural wrappers — just pass children through
-    'innodlevel', 'innodtable', 'innodtr', 'innodtd',
+    'innodxml', 'innoddoc', 'article', 'chapter', 'part', 'book',
+    # Structo string/reference wrappers — pass content through
+    'innodstr', 'innodref', 'innoddoc',
+    # Structo structural wrappers
+    'innodtable', 'innodtr', 'innodtd',
     'thead', 'tbody', 'tfoot',
+    # Generic containers
+    'metadata', 'header', 'footer', 'main', 'section_group',
 })
 
 
@@ -166,6 +170,10 @@ def _render_xml_preview(xml_text: str) -> str:
 
         # ── Structo: innodReplace ──────────────────────────────────────────
         if local == 'innodreplace':
+            # Nodes with no real inner content are paragraph/newline markers;
+            # render them as a line break so the preview has correct spacing.
+            if not inner.strip():
+                return '<br>' + tail
             user_edit = el.get('userEdit') or el.get('useredit') or ''
             badge = ('<span class="innodrep-badge">edit</span>'
                      if user_edit else '')
@@ -392,38 +400,41 @@ class _CodeEdit(QPlainTextEdit):
         text = self.toPlainText()
         pos  = self.textCursor().position()
 
-        # Scan backward (up to 300 chars) for an opening '<'
-        lo      = max(0, pos - 300)
-        segment = text[lo:pos]
-        lt_rel  = segment.rfind('<')
-        if lt_rel < 0:
+        # Find a '<...>' region the cursor is inside OR immediately after.
+        # Search backward up to 500 chars for the nearest '<'.
+        lo     = max(0, pos - 500)
+        lt_pos = text.rfind('<', lo, pos + 1)
+        if lt_pos < 0:
             self._apply_extra_selections()
             return
 
-        abs_lt = lo + lt_rel
-        between = segment[lt_rel:]
-        if '>' in between:          # cursor is past a closed tag, skip
+        gt_pos = text.find('>', lt_pos)
+        if gt_pos < 0:
             self._apply_extra_selections()
             return
 
-        m = _re.match(r'<(/?)([A-Za-z_][\w:.-]*)', segment[lt_rel:])
+        # Cursor must be within [lt_pos, gt_pos+1] — covers both inside the
+        # tag AND immediately after the closing '>'.
+        if not (lt_pos <= pos <= gt_pos + 1):
+            self._apply_extra_selections()
+            return
+
+        tag_text    = text[lt_pos:gt_pos + 1]
+        abs_lt      = lt_pos
+        abs_tag_end = gt_pos + 1
+
+        # Skip self-closing tags
+        if tag_text.rstrip().endswith('/>'):
+            self._apply_extra_selections()
+            return
+
+        m = _re.match(r'<(/?)([A-Za-z_][\w:.-]*)', tag_text)
         if not m:
             self._apply_extra_selections()
             return
 
         is_close = bool(m.group(1))
         tag_name = m.group(2)
-
-        tag_end = text.find('>', abs_lt)
-        if tag_end < 0:
-            self._apply_extra_selections()
-            return
-        abs_tag_end = tag_end + 1
-
-        # Skip self-closing tags
-        if text[abs_lt:abs_tag_end].rstrip().endswith('/>'):
-            self._apply_extra_selections()
-            return
 
         fmt = QTextCharFormat()
         fmt.setBackground(QColor('#dbeafe'))
@@ -746,6 +757,29 @@ class _XmlCompleter(QFrame):
         'innodReference', 'innodReplace', 'innodTable', 'innodTd', 'innodTr',
     ])
 
+    # Compact attribute hint shown next to each tag in the dropdown.
+    # Keys must match ALL_TAGS exactly (case-sensitive).
+    _TAG_ATTR_HINTS: dict = {
+        'section':          'level="" id=""',
+        'inno-ref':         'type="" href=""',
+        'innodFootnote':    'fid="" id=""',
+        'innodFootnoteRef': 'fid="" id="" text=""',
+        'innodHeading':     '',
+        'innodIdentifier':  '',
+        'innodImg':         'src=""',
+        'innodLevel':       'level=""',
+        'innodMeta':        'name="" value=""',
+        'innodReference':   '',
+        'innodReplace':     'text=""',
+        'innodTable':       '',
+        'innodTd':          '',
+        'innodTr':          '',
+        'table':            '',
+        'tr':               '',
+        'td':               'colspan="" rowspan=""',
+        'th':               'colspan="" rowspan=""',
+    }
+
     # Insertion snippets with '|' marking the desired cursor position.
     # When a tag is selected from the popup, this snippet is inserted instead
     # of the bare <tag></tag>, providing attribute placeholders for required attrs.
@@ -789,7 +823,7 @@ class _XmlCompleter(QFrame):
             'QFrame{background:#ffffff;border:1px solid #cbd5e1;'
             'border-radius:5px;box-shadow:0 2px 8px rgba(0,0,0,0.12);}'
         )
-        self.setFixedWidth(260)
+        self.setFixedWidth(400)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(1, 1, 1, 1)
@@ -800,7 +834,7 @@ class _XmlCompleter(QFrame):
         self._list.setStyleSheet(
             'QListWidget{background:#ffffff;color:#1e293b;border:none;'
             'font-family:Consolas,monospace;font-size:11px;}'
-            'QListWidget::item{padding:3px 10px;}'
+            'QListWidget::item{padding:3px 10px;color:#1e293b;}'
             'QListWidget::item:selected{background:#ede9fe;color:#4f46e5;}'
             'QListWidget::item:hover{background:#f1f5f9;}'
         )
@@ -844,7 +878,9 @@ class _XmlCompleter(QFrame):
 
     def selected_tag(self) -> str:
         item = self._list.currentItem()
-        return item.text() if item else ''
+        if not item:
+            return ''
+        return item.data(Qt.ItemDataRole.UserRole) or item.text()
 
     def _populate(self, filter_text: str):
         self._list.clear()
@@ -854,13 +890,16 @@ class _XmlCompleter(QFrame):
                    if fl and fl in t.lower() and not t.lower().startswith(fl)]
         ordered = (prefix + contain) if fl else self.ALL_TAGS
         for tag in ordered:
-            item = QListWidgetItem(tag)
-            snippet = self._TAG_SNIPPETS.get(tag, '')
-            if snippet:
-                # Show attribute hint extracted from snippet
-                attrs = _re.findall(r'\b(\w[\w-]*)="', snippet)
-                if attrs:
-                    item.setToolTip('attrs: ' + ', '.join(attrs))
+            # Build inline attribute hint: prefer explicit _TAG_ATTR_HINTS,
+            # fall back to extracting attr names from the snippet.
+            hint = self._TAG_ATTR_HINTS.get(tag)
+            if hint is None:
+                snippet = self._TAG_SNIPPETS.get(tag, '')
+                attrs   = _re.findall(r'\b(\w[\w-]*)="', snippet)
+                hint    = '  '.join(f'{a}=""' for a in attrs) if attrs else ''
+            label = f'{tag:<22} {hint}' if hint else tag
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, tag)   # store real tag name
             self._list.addItem(item)
         if self._list.count() > 0:
             self._list.setCurrentRow(0)
