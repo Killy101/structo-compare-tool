@@ -1279,10 +1279,22 @@ class MainWindow(QMainWindow):
 
         self._stack.setCurrentIndex(2)
         n = len(self._changes)
-        self._status.showMessage(
-            f'Comparison complete — {n} change{"s" if n != 1 else ""} found. '
-            'Edit either panel and click ⟳ Re-Compare to refresh, or F3 to step through changes.'
+        old_blocks = len(w.old_doc.blocks)
+        new_blocks = len(w.new_doc.blocks)
+        large = old_blocks > 5_000 or new_blocks > 5_000
+        doc_info = (
+            f'{old_blocks:,} blocks (old) · {new_blocks:,} blocks (new)'
+            if large else ''
         )
+        loading_note = ' — panels loading progressively, please wait…' if large else ''
+        base_msg = f'Comparison complete — {n} change{"s" if n != 1 else ""} found.'
+        if doc_info:
+            self._status.showMessage(f'{base_msg}  {doc_info}{loading_note}')
+        else:
+            self._status.showMessage(
+                f'{base_msg} '
+                'Edit either panel and click ⟳ Re-Compare to refresh, or F3 to step through changes.'
+            )
     def _on_compare_error(self, msg: str):
         self._stack.setCurrentIndex(0)
         self._status.showMessage(f'Compare error: {msg[:120]}')
