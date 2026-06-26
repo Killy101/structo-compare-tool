@@ -17,6 +17,7 @@ PDF -> our internal ``Document`` model.
 
 import bisect
 import re
+import time
 import fitz                               # pip install pymupdf
 from models.document import Document, TextBlock, TextSpan
 from typing import Any, List, Tuple
@@ -105,7 +106,11 @@ def extract_pdf(path: str) -> Document:
     doc = Document()
     pdf = fitz.open(path)
 
-    for page in pdf:
+    for page_num, page in enumerate(pdf):
+        # Yield the GIL every 10 pages so the main-thread event loop stays
+        # responsive even when processing very large documents.
+        if page_num and page_num % 10 == 0:
+            time.sleep(0)
         # -------------------------------------------------------------
         # 1. Annotation-based detection (StrikeOut / Underline)
         # -------------------------------------------------------------
