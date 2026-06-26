@@ -550,7 +550,6 @@ class MainWindow(QMainWindow):
         self._changes:          list = []
         self._change_index:     int = -1
         self._pdf_zoom:         float = 2.0
-        self._dark_mode:        bool = False
 
         self._build_ui()
         self._wire_signals()
@@ -599,7 +598,6 @@ class MainWindow(QMainWindow):
         self.btn_view       = _btn('PDF Page View',  '#64748b', '#475569')
         self.btn_export     = _btn('Export ▾',       '#2563eb', '#1d4ed8')
         self.btn_save       = _btn('Save XML As…',   '#dc2626', '#b91c1c')
-        self.btn_dark_mode  = _btn('☽ Dark',         '#374151', '#1f2937')
 
         self.btn_recompare.setToolTip(
             'Re-run the comparison from the (edited) panel text  ·  Ctrl+R')
@@ -691,8 +689,6 @@ class MainWindow(QMainWindow):
         tb.addWidget(_sep())
         tb.addWidget(self._save_status)
         tb.addWidget(self.btn_save)
-        tb.addWidget(_sep())
-        tb.addWidget(self.btn_dark_mode)
         tb.addWidget(_sep())
         tb.addWidget(self.btn_back)
         root.addWidget(toolbar)
@@ -916,9 +912,6 @@ class MainWindow(QMainWindow):
         # Zoom controls
         self.btn_zoom_in.clicked.connect(lambda: self._adjust_zoom(1.25))
         self.btn_zoom_out.clicked.connect(lambda: self._adjust_zoom(0.8))
-
-        # Dark mode toggle
-        self.btn_dark_mode.clicked.connect(self._toggle_dark_mode)
 
         # Keyboard shortcuts
         QShortcut(QKeySequence('Ctrl+S'), self).activated.connect(self._save_xml)
@@ -1515,49 +1508,6 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._status.showMessage(f'Save error: {e}')
             self._set_saved_state('✕ Save failed', '#f38ba8')
-
-    # ── Dark / light mode ─────────────────────────────────────────────────
-    def _toggle_dark_mode(self):
-        self._dark_mode = not self._dark_mode
-        if self._dark_mode:
-            self.btn_dark_mode.setText('☀ Light')
-            self._apply_dark_theme()
-        else:
-            self.btn_dark_mode.setText('☽ Dark')
-            self._apply_light_theme()
-
-    def _apply_dark_theme(self):
-        dark_bg    = '#1e1e2e'
-        dark_surf  = '#181825'
-        dark_text  = '#cdd6f4'
-        dark_muted = '#a6adc8'
-        dark_border = '#45475a'
-
-        self._work_page.setStyleSheet(f'background:{dark_bg};')
-        self._upload_page.setStyleSheet(f'background:{dark_bg};')
-        self._proc_page.setStyleSheet(f'background:{dark_bg};')
-
-        self._status.setStyleSheet(
-            f'background:{dark_surf};color:{dark_muted};'
-            f'border-top:1px solid {dark_border};font-size:12px;')
-
-        # Sidebar (already dark from Catppuccin CSS, but chrome needs updating)
-        self.sidebar.setStyleSheet(
-            f'background:{dark_surf};color:{dark_text};border:none;'
-            f'border-left:1px solid {dark_border};')
-        self._sidebar_wrap.setStyleSheet(f'background:{dark_surf};')
-
-    def _apply_light_theme(self):
-        self.setStyleSheet('')
-        self._work_page.setStyleSheet('')
-        self._upload_page.setStyleSheet('background:#f0f4f8;')
-        self._proc_page.setStyleSheet('background:#f0f4f8;')
-        self._status.setStyleSheet('font-size:12px;')
-        self.sidebar.setStyleSheet(
-            'background:#ffffff;border:none;border-left:1px solid #e2e8f0;')
-        self._sidebar_wrap.setStyleSheet('')
-        for panel in (self.old_panel, self.new_panel):
-            panel.browser.setStyleSheet('background:#ffffff;border:none;')
 
     # ── Collapse / expand panels ──────────────────────────────────────────────
     def _toggle_sidebar(self):

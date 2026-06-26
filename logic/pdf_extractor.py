@@ -120,13 +120,6 @@ def extract_pdf(path: str) -> Document:
             if annot.type[1] == "Underline"
         ]
 
-        # Hyperlink annotations are visually underlined but are stored
-        # as Link annotations - we treat them as "underline".
-        try:
-            link_rects = [fitz.Rect(lk["from"]) for lk in page.get_links()]
-        except Exception:
-            link_rects = []
-
         # -------------------------------------------------------------
         # 2. Drawing-based detection (thin lines / rectangles)
         # -------------------------------------------------------------
@@ -250,7 +243,6 @@ def extract_pdf(path: str) -> Document:
                         )
                         underline = (
                             any(span_rect.intersects(r) for r in underline_rects)
-                            or any(span_rect.intersects(r) for r in link_rects)
                             or draw_underline
                         )
 
