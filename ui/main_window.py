@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QApplication,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QUrl
-from PySide6.QtGui import QKeySequence, QShortcut, QTextDocument, QColor, QPalette
+from PySide6.QtGui import QKeySequence, QShortcut, QTextDocument, QTextCursor, QColor, QPalette
 
 from ui.document_panel import DocumentPanel
 from ui.xml_editor import XmlEditor
@@ -173,6 +173,136 @@ def _sep() -> QFrame:
     f.setFrameShape(QFrame.Shape.VLine)
     f.setStyleSheet('color:#e2e8f0;')
     return f
+
+
+# ---------------------------------------------------------------------------
+# Per-panel inline search bar
+# ---------------------------------------------------------------------------
+class _PanelSearchBar(QWidget):
+    """Compact search strip pinned below a panel header; hidden until Ctrl+F."""
+
+    _SS_INPUT = (
+        'QLineEdit{background:#ffffff;color:#1e293b;border:1px solid #cbd5e1;'
+        'border-radius:3px;padding:2px 8px;font-size:12px;}'
+        'QLineEdit:focus{border:1px solid #6366f1;}'
+    )
+    _SS_BTN = (
+        'QPushButton{background:#f1f5f9;color:#475569;border:1px solid #e2e8f0;'
+        'border-radius:3px;padding:2px 8px;font-size:11px;min-width:24px;}'
+        'QPushButton:hover{background:#e2e8f0;color:#334155;}'
+    )
+
+    def __init__(self, panel: 'DocumentPanel', placeholder: str, parent=None):
+        super().__init__(parent)
+        self._panel = panel
+        self.setFixedHeight(36)
+        self.setStyleSheet('background:#f0f4ff;border-bottom:1px solid #c7d2fe;')
+        self.setVisible(False)
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(8, 3, 8, 3)
+        lay.setSpacing(5)
+
+        icon = QLabel('🔍')
+        icon.setFixedWidth(18)
+        icon.setStyleSheet('background:transparent;font-size:11px;')
+
+        self._input = QLineEdit()
+        self._input.setPlaceholderText(placeholder)
+        self._input.setStyleSheet(self._SS_INPUT)
+
+        self._count_lbl = QLabel('')
+        self._count_lbl.setFixedWidth(88)
+        self._count_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._count_lbl.setStyleSheet('color:#64748b;font-size:11px;background:transparent;')
+
+        btn_prev = QPushButton('▲')
+        btn_prev.setStyleSheet(self._SS_BTN)
+        btn_prev.setFixedWidth(28)
+        btn_prev.setToolTip('Previous match  (Shift+Enter)')
+
+        btn_next = QPushButton('▼')
+        btn_next.setStyleSheet(self._SS_BTN)
+        btn_next.setFixedWidth(28)
+        btn_next.setToolTip('Next match  (Enter)')
+
+        btn_close = QPushButton('✕')
+        btn_close.setFixedWidth(26)
+        btn_close.setStyleSheet(
+            'QPushButton{background:#fee2e2;color:#dc2626;border:none;'
+            'border-radius:3px;font-size:11px;}'
+            'QPushButton:hover{background:#fecaca;}'
+        )
+        btn_close.setToolTip('Close search  (Esc)')
+
+        lay.addWidget(icon)
+        lay.addWidget(self._input, 1)
+        lay.addWidget(self._count_lbl)
+        lay.addWidget(btn_prev)
+        lay.addWidget(btn_next)
+        lay.addWidget(btn_close)
+
+        self._input.textChanged.connect(self._on_changed)
+        self._input.returnPressed.connect(self.find_next)
+        btn_next.clicked.connect(self.find_next)
+        btn_prev.clicked.connect(self.find_prev)
+        btn_close.clicked.connect(self.close_bar)
+
+    # ------------------------------------------------------------------
+    def open_bar(self):
+        self.setVisible(True)
+        self._input.setFocus()
+        self._input.selectAll()
+
+    def close_bar(self):
+        self.setVisible(False)
+        self._count_lbl.setText('')
+
+    def set_query(self, text: str):
+        """Pre-fill the query (e.g. when Ctrl+F is pressed with selection)."""
+        self._input.setText(text)
+
+    # ------------------------------------------------------------------
+    def _on_changed(self, text: str):
+        browser = self._panel.browser
+        if not text:
+            self._count_lbl.setText('')
+            return
+        n = browser.toPlainText().lower().count(text.lower())
+        if n == 0:
+            self._count_lbl.setText('No matches')
+            self._count_lbl.setStyleSheet(
+                'color:#dc2626;font-size:11px;background:transparent;')
+        else:
+            self._count_lbl.setText(f'{n} match{"es" if n != 1 else ""}')
+            self._count_lbl.setStyleSheet(
+                'color:#059669;font-size:11px;background:transparent;')
+            # Jump to the first occurrence
+            c = browser.textCursor()
+            c.movePosition(QTextCursor.MoveOperation.Start)
+            browser.setTextCursor(c)
+            browser.find(text)
+
+    def find_next(self):
+        text = self._input.text()
+        if not text:
+            return
+        if not self._panel.browser.find(text):
+            c = self._panel.browser.textCursor()
+            c.movePosition(QTextCursor.MoveOperation.Start)
+            self._panel.browser.setTextCursor(c)
+            self._panel.browser.find(text)
+
+    def find_prev(self):
+        text = self._input.text()
+        if not text:
+            return
+        flags = QTextDocument.FindFlag.FindBackward
+        if not self._panel.browser.find(text, flags):
+            c = self._panel.browser.textCursor()
+            c.movePosition(QTextCursor.MoveOperation.End)
+            self._panel.browser.setTextCursor(c)
+            self._panel.browser.find(text, flags)
 
 
 # ---------------------------------------------------------------------------
@@ -877,57 +1007,6 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.btn_back)
         root.addWidget(toolbar)
 
-        # ── Search bar (Ctrl+F, hidden by default) ────────────────────────────
-        search_bar = QWidget()
-        search_bar.setVisible(False)
-        search_bar.setStyleSheet('background:#f8fafc;border-bottom:1px solid #e2e8f0;')
-        search_bar.setFixedHeight(42)
-        self._search_bar = search_bar
-        sb_lay = QHBoxLayout(search_bar)
-        sb_lay.setContentsMargins(12, 6, 12, 6)
-        sb_lay.setSpacing(6)
-
-        sb_lbl = QLabel('Find:')
-        sb_lbl.setStyleSheet('color:#475569;font-size:12px;background:transparent;')
-
-        self._search_input = QLineEdit()
-        self._search_input.setPlaceholderText('Search in both panels…')
-        self._search_input.setFixedWidth(280)
-        self._search_input.setStyleSheet(
-            'QLineEdit{background:#ffffff;color:#1e293b;border:1px solid #cbd5e1;'
-            'border-radius:3px;padding:3px 8px;font-size:12px;}'
-            'QLineEdit:focus{border:1px solid #6366f1;}'
-        )
-
-        self._search_count_lbl = QLabel('')
-        self._search_count_lbl.setFixedWidth(120)
-        self._search_count_lbl.setStyleSheet('color:#64748b;font-size:11px;background:transparent;')
-
-        _sbtn_ss = (
-            'QPushButton{background:#f1f5f9;color:#475569;border:1px solid #e2e8f0;'
-            'border-radius:3px;padding:3px 10px;font-size:11px;}'
-            'QPushButton:hover{background:#e2e8f0;color:#334155;}'
-        )
-        btn_prev = QPushButton('▲ Prev')
-        btn_prev.setStyleSheet(_sbtn_ss)
-        btn_next = QPushButton('Next ▼')
-        btn_next.setStyleSheet(_sbtn_ss)
-        btn_close_search = QPushButton('✕')
-        btn_close_search.setFixedWidth(28)
-        btn_close_search.setStyleSheet(
-            'QPushButton{background:#fee2e2;color:#dc2626;border:none;border-radius:3px;font-size:11px;}'
-            'QPushButton:hover{background:#fecaca;}'
-        )
-
-        sb_lay.addWidget(sb_lbl)
-        sb_lay.addWidget(self._search_input)
-        sb_lay.addWidget(self._search_count_lbl)
-        sb_lay.addStretch()
-        sb_lay.addWidget(btn_prev)
-        sb_lay.addWidget(btn_next)
-        sb_lay.addWidget(btn_close_search)
-        root.addWidget(search_bar)
-
         # ── Old PDF panel ─────────────────────────────────────────────────────
         old_wrap = QWidget()
         ow = QVBoxLayout(old_wrap)
@@ -935,6 +1014,8 @@ class MainWindow(QMainWindow):
         ow.setSpacing(0)
         ow.addWidget(_panel_header('Old PDF  ·  editable — fix alignment then ⟳ Re-Compare'))
         self.old_panel = DocumentPanel()
+        self._old_search = _PanelSearchBar(self.old_panel, 'Search in Old PDF…')
+        ow.addWidget(self._old_search)
         ow.addWidget(self.old_panel)
 
         # ── New PDF panel ─────────────────────────────────────────────────────
@@ -944,6 +1025,8 @@ class MainWindow(QMainWindow):
         nw.setSpacing(0)
         nw.addWidget(_panel_header('New PDF  ·  editable — fix alignment then ⟳ Re-Compare'))
         self.new_panel = DocumentPanel()
+        self._new_search = _PanelSearchBar(self.new_panel, 'Search in New PDF…')
+        nw.addWidget(self._new_search)
         nw.addWidget(self.new_panel)
 
         # ── PDF row ───────────────────────────────────────────────────────────
@@ -1062,13 +1145,6 @@ class MainWindow(QMainWindow):
         ))
         root.addWidget(legend_bar)
 
-        # Wire up search bar buttons
-        self._search_input.textChanged.connect(self._on_search_changed)
-        self._search_input.returnPressed.connect(self._search_next)
-        btn_next.clicked.connect(self._search_next)
-        btn_prev.clicked.connect(self._search_prev)
-        btn_close_search.clicked.connect(self._close_search)
-
         # Wire up collapse buttons (panel header AND toolbar)
         self._btn_toggle_sidebar.clicked.connect(self._toggle_sidebar)
         self._btn_toggle_xml.clicked.connect(self._toggle_xml)
@@ -1106,7 +1182,6 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence('Ctrl+F'), self).activated.connect(self._open_search)
         QShortcut(QKeySequence.StandardKey.ZoomIn, self).activated.connect(lambda: self._adjust_zoom(1.25))
         QShortcut(QKeySequence.StandardKey.ZoomOut, self).activated.connect(lambda: self._adjust_zoom(0.8))
-        QShortcut(QKeySequence('Escape'), self._search_bar).activated.connect(self._close_search)
 
         # Sync scroll
         self._sync_cb.toggled.connect(self._on_sync_toggled)
@@ -1197,7 +1272,6 @@ class MainWindow(QMainWindow):
             w.setVisible(False)
         self._update_change_counter()
         self._close_search()
-        self._search_input.clear()
 
         # Upload page fields
         self._upload_page.reset()
@@ -1935,58 +2009,13 @@ span.fmt-changed {
 
     # ── Search bar ────────────────────────────────────────────────────────────
     def _open_search(self):
-        self._search_bar.setVisible(True)
-        self._search_input.setFocus()
-        self._search_input.selectAll()
+        """Ctrl+F — show both per-panel search bars; focus the Old PDF one."""
+        self._old_search.open_bar()
+        self._new_search.open_bar()
+        self._old_search._input.setFocus()
 
     def _close_search(self):
-        self._search_bar.setVisible(False)
-        self._search_count_lbl.setText('')
-
-    def _on_search_changed(self, text: str):
-        if not text:
-            self._search_count_lbl.setText('')
-            return
-        t = text.lower()
-        old_count = self.old_panel.browser.toPlainText().lower().count(t)
-        new_count = self.new_panel.browser.toPlainText().lower().count(t)
-        total = old_count + new_count
-        if total == 0:
-            self._search_count_lbl.setText('No matches')
-            self._search_count_lbl.setStyleSheet('color:#dc2626;font-size:11px;background:transparent;')
-        else:
-            self._search_count_lbl.setText(f'{total} match{"es" if total != 1 else ""}')
-            self._search_count_lbl.setStyleSheet('color:#059669;font-size:11px;background:transparent;')
-
-    def _search_next(self):
-        text = self._search_input.text()
-        if not text:
-            return
-        found_old = self.old_panel.browser.find(text)
-        found_new = self.new_panel.browser.find(text)
-        if not found_old and not found_new:
-            # Wrap: reset cursors and try again from top
-            self.old_panel.browser.moveCursor(self.old_panel.browser.textCursor().MoveOperation.Start)
-            self.new_panel.browser.moveCursor(self.new_panel.browser.textCursor().MoveOperation.Start)
-            self.old_panel.browser.find(text)
-            self.new_panel.browser.find(text)
-
-    def _search_prev(self):
-        text = self._search_input.text()
-        if not text:
-            return
-        flags = QTextDocument.FindFlag.FindBackward
-        found_old = self.old_panel.browser.find(text, flags)
-        found_new = self.new_panel.browser.find(text, flags)
-        if not found_old and not found_new:
-            # Wrap: reset cursors and try again from bottom
-            from PySide6.QtGui import QTextCursor
-            c_old = self.old_panel.browser.textCursor()
-            c_old.movePosition(QTextCursor.MoveOperation.End)
-            self.old_panel.browser.setTextCursor(c_old)
-            c_new = self.new_panel.browser.textCursor()
-            c_new.movePosition(QTextCursor.MoveOperation.End)
-            self.new_panel.browser.setTextCursor(c_new)
-            self.old_panel.browser.find(text, flags)
-            self.new_panel.browser.find(text, flags)
+        """Hide both per-panel search bars."""
+        self._old_search.close_bar()
+        self._new_search.close_bar()
 
