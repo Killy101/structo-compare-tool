@@ -146,6 +146,65 @@ def _render_toks(toks: List[_Token], limit: int = 120) -> str:
 
 
 # -----------------------------------------------------------------------
+# Alignment spacer helpers
+# -----------------------------------------------------------------------
+_LH  = 22   # line-height px (13 px font × 1.65 leading, rounded up)
+_PM  = 9    # per-paragraph margin px (4 top + 4 bottom + 1 gap)
+_CPL = 75   # estimated chars per line (panel ≈ 600 px @ 13 px Arial)
+
+
+def _block_h(block: TextBlock) -> int:
+    if block.is_blank():
+        return _LH + _PM
+    n = max(1, (len(block.plain_text()) + _CPL - 1) // _CPL)
+    return n * _LH + _PM
+
+
+def _compute_spacers(
+    old_blocks: List[TextBlock],
+    new_blocks: List[TextBlock],
+    matcher: 'difflib.SequenceMatcher',
+) -> Tuple[dict, dict]:
+    """Return (old_spacers, new_spacers) mapping block_index → extra px after that block.
+
+    Index -1 means "before block 0".
+    """
+    old_sp: dict = {}
+    new_sp: dict = {}
+
+    def _add(d: dict, k: int, v: int) -> None:
+        d[k] = d.get(k, 0) + v
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == 'equal':
+            for oi, ni in zip(range(i1, i2), range(j1, j2)):
+                diff = _block_h(old_blocks[oi]) - _block_h(new_blocks[ni])
+                if diff > 0:
+                    _add(new_sp, ni, diff)
+                elif diff < 0:
+                    _add(old_sp, oi, -diff)
+
+        elif tag == 'replace':
+            old_h = sum(_block_h(old_blocks[i]) for i in range(i1, i2))
+            new_h = sum(_block_h(new_blocks[j]) for j in range(j1, j2))
+            diff = old_h - new_h
+            if diff > 0:
+                _add(new_sp, (j2 - 1) if j2 > j1 else j1 - 1, diff)
+            elif diff < 0:
+                _add(old_sp, (i2 - 1) if i2 > i1 else i1 - 1, -diff)
+
+        elif tag == 'delete':      # only in old → gap in new
+            total = sum(_block_h(old_blocks[i]) for i in range(i1, i2))
+            _add(new_sp, j1 - 1, total)
+
+        elif tag == 'insert':      # only in new → gap in old
+            total = sum(_block_h(new_blocks[j]) for j in range(j1, j2))
+            _add(old_sp, i1 - 1, total)
+
+    return old_sp, new_sp
+
+
+# -----------------------------------------------------------------------
 # Render one panel, highlighting changed words and dropping nav anchors.
 # -----------------------------------------------------------------------
 def _p(inner: str, indent: int = 0, bg: str = "") -> str:
@@ -163,12 +222,16 @@ def _p(inner: str, indent: int = 0, bg: str = "") -> str:
 
 
 def _render_panel(blocks: List[TextBlock], changed: List[bool],
-                  anchors: dict, highlight_mode: str) -> str:
+                  anchors: dict, highlight_mode: str,
+                  spacers: 'dict | None' = None) -> str:
     """Render *blocks*, highlighting words whose flat index is flagged in
     *changed* and emitting a navigation anchor where *anchors* has one.
 
     *highlight_mode* is ``"del"`` or ``"add"``, driving both word-level
     foreground colour and the paragraph background band.
+
+    *spacers* maps block_index → extra px to add after that block, with -1
+    meaning "before block 0".  This keeps equal blocks vertically aligned.
 
     The word iteration order here is identical to :func:`_flatten`, so the
     running global index ``g`` stays aligned with ``changed`` / ``anchors``.
@@ -177,29 +240,41 @@ def _render_panel(blocks: List[TextBlock], changed: List[bool],
 
     out: List[str] = []
     g = 0
-    for block in blocks:
+
+    if spacers:
+        px = spacers.get(-1, 0)
+        if px > 0:
+            out.append(f'<div style="height:{px}px"></div>\n')
+
+    for idx, block in enumerate(blocks):
         if block.is_blank():
             out.append(_p(""))
-            continue
-        pieces: List[str] = []
-        block_has_change = False
-        for word, span in _block_words(block):
-            tok = _Token(
-                word=word,
-                bold=span.bold,
-                italic=span.italic,
-                src_strike=span.strikethrough,
-                underline=span.underline,
-            )
-            word_changed = changed[g]
-            if word_changed:
-                block_has_change = True
-            cid = anchors.get(g)
-            a_tag = f'<a name="{cid}">&#8203;</a>' if cid else ""
-            pieces.append(a_tag + tok.render(highlight=highlight_mode if word_changed else ""))
-            g += 1
-        out.append(_p(" ".join(pieces), indent=block.indent,
-                      bg=para_bg if block_has_change else ""))
+        else:
+            pieces: List[str] = []
+            block_has_change = False
+            for word, span in _block_words(block):
+                tok = _Token(
+                    word=word,
+                    bold=span.bold,
+                    italic=span.italic,
+                    src_strike=span.strikethrough,
+                    underline=span.underline,
+                )
+                word_changed = changed[g]
+                if word_changed:
+                    block_has_change = True
+                cid = anchors.get(g)
+                a_tag = f'<a name="{cid}">&#8203;</a>' if cid else ""
+                pieces.append(a_tag + tok.render(highlight=highlight_mode if word_changed else ""))
+                g += 1
+            out.append(_p(" ".join(pieces), indent=block.indent,
+                          bg=para_bg if block_has_change else ""))
+
+        if spacers:
+            px = spacers.get(idx, 0)
+            if px > 0:
+                out.append(f'<div style="height:{px}px"></div>\n')
+
     return "".join(out)
 
 
@@ -409,10 +484,46 @@ def build_diff_html(old_doc: Document, new_doc: Document) -> Tuple[str, str, str
 
             changes.append({"id": cid, "kind": kind, "old": old_txt, "new": new_txt})
 
-    old_html = _render_panel(old_blocks, old_changed, old_anchors, "del")
-    new_html = _render_panel(new_blocks, new_changed, new_anchors, "add")
+    old_sp, new_sp = _compute_spacers(old_blocks, new_blocks, block_matcher)
+    old_html = _render_panel(old_blocks, old_changed, old_anchors, "del", spacers=old_sp)
+    new_html = _render_panel(new_blocks, new_changed, new_anchors, "add", spacers=new_sp)
     sidebar_html = _build_sidebar(sidebar_items, stats)
     return old_html, new_html, sidebar_html, changes
+
+
+# -----------------------------------------------------------------------
+# Live alignment (no diff highlights) — used while the user is editing
+# -----------------------------------------------------------------------
+def align_documents_html(old_doc: Document, new_doc: Document) -> Tuple[str, str]:
+    """Render both documents with vertical spacers so matching blocks sit at
+    the same position.  No diff highlights — used during live editing."""
+    old_blocks = old_doc.blocks
+    new_blocks = new_doc.blocks
+
+    old_texts = [_block_text(b) for b in old_blocks]
+    new_texts = [_block_text(b) for b in new_blocks]
+    _large = (len(old_texts) + len(new_texts)) > 4_000
+    sm = difflib.SequenceMatcher(None, old_texts, new_texts, autojunk=_large)
+    old_sp, new_sp = _compute_spacers(old_blocks, new_blocks, sm)
+
+    def _render(blocks: List[TextBlock], spacers: dict) -> str:
+        out: List[str] = []
+        px0 = spacers.get(-1, 0)
+        if px0 > 0:
+            out.append(f'<div style="height:{px0}px"></div>\n')
+        for idx, block in enumerate(blocks):
+            if block.is_blank():
+                out.append('<p style="margin:3px 0;line-height:1.6"></p>\n')
+            else:
+                pad = '&nbsp;' * block.indent if block.indent else ''
+                inner = pad + block.to_html()
+                out.append(f'<p style="margin:3px 0;line-height:1.6">{inner}</p>\n')
+            px = spacers.get(idx, 0)
+            if px > 0:
+                out.append(f'<div style="height:{px}px"></div>\n')
+        return ''.join(out)
+
+    return _render(old_blocks, old_sp), _render(new_blocks, new_sp)
 
 
 # -----------------------------------------------------------------------

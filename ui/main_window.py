@@ -528,16 +528,18 @@ class _UploadPage(QWidget):
 
     # ── Custom background (image or fallback gradient) ──────────────────────
     _bg_pixmap = None   # class-level cache so QPixmap is loaded once
+    _bg_tried = False   # set to True after first load attempt
 
     @classmethod
     def _load_bg(cls):
-        if cls._bg_pixmap is None:
+        if not cls._bg_tried:
+            cls._bg_tried = True
             import os
             from PySide6.QtGui import QPixmap
             img = os.path.join(os.path.dirname(__file__), '..', 'assets', 'background.jpg')
             img = os.path.normpath(img)
             px = QPixmap(img)
-            cls._bg_pixmap = px if not px.isNull() else False  # False = not found
+            cls._bg_pixmap = px if not px.isNull() else None
         return cls._bg_pixmap
 
     def paintEvent(self, event):
@@ -739,6 +741,7 @@ class MainWindow(QMainWindow):
         self._pdf_zoom:         float = 2.0
         self._search_matches:   list = []   # list of (panel, QTextCursor) tuples
         self._search_idx:       int  = -1
+        self._realigning:       bool = False   # guard against re-entrancy in live realign
 
         self._build_ui()
         self._wire_signals()
@@ -1284,6 +1287,7 @@ class MainWindow(QMainWindow):
             f'Comparison complete — {n} change{"s" if n != 1 else ""} found. '
             'Edit either panel and click ⟳ Re-Compare to refresh, or F3 to step through changes.'
         )
+        self._connect_realign()
 
     def _on_compare_error(self, msg: str):
         self._stack.setCurrentIndex(0)
@@ -1513,7 +1517,7 @@ class MainWindow(QMainWindow):
         """
         if not xml_text.strip():
             return []
-        from lxml import etree as _et
+        from lxml import etree as _et  # type: ignore[import-untyped]
         try:
             root = _et.fromstring(xml_text.encode('utf-8'))
         except Exception:
@@ -1924,6 +1928,46 @@ span.fmt-changed {
             self._btn_xml_tb.setText('XML ▼')
             self._btn_xml_tb.setChecked(False)
             self._left_splitter.setSizes([560, 280])
+
+    # ── Live sentence alignment ───────────────────────────────────────────────
+    def _connect_realign(self):
+        """Wire debounced live-alignment after the first compare completes.
+        Called once; subsequent calls are no-ops.
+        """
+        if hasattr(self, '_align_timer'):
+            return
+        from PySide6.QtCore import QTimer
+        self._align_timer = QTimer(self)
+        self._align_timer.setSingleShot(True)
+        self._align_timer.setInterval(480)
+        self._align_timer.timeout.connect(self._do_realign)
+        self.old_panel.browser.document().contentsChanged.connect(self._schedule_realign)
+        self.new_panel.browser.document().contentsChanged.connect(self._schedule_realign)
+
+    def _schedule_realign(self):
+        if self._realigning:
+            return
+        if hasattr(self, '_align_timer'):
+            self._align_timer.start()
+
+    def _do_realign(self):
+        if self._realigning:
+            return
+        old_doc = self.old_panel.edited_document()
+        new_doc = self.new_panel.edited_document()
+        if not old_doc.blocks or not new_doc.blocks:
+            return
+        self._realigning = True
+        try:
+            from logic.differ import align_documents_html
+            old_html, new_html = align_documents_html(old_doc, new_doc)
+            focused = QApplication.focusWidget()
+            if focused is not self.old_panel.browser:
+                self.old_panel.set_html(old_html)
+            if focused is not self.new_panel.browser:
+                self.new_panel.set_html(new_html)
+        finally:
+            self._realigning = False
 
     # ── Search bar ────────────────────────────────────────────────────────────
     def _open_search(self):
