@@ -96,21 +96,28 @@ def _check_line_overlap(
     return False
 
 
-def extract_pdf(path: str) -> Document:
+def extract_pdf(path: str, progress_cb=None) -> Document:
     """
     Turn a PDF file into a :class:`models.document.Document`.
 
     The function is deliberately *pure* - it never creates Qt objects,
     which means it is safe to run inside a ``QThread``.
+
+    *progress_cb*, if given, is called as ``progress_cb(page_num, total_pages)``
+    every 20 pages so callers can update a progress indicator.  It is called
+    from whatever thread runs extract_pdf, so callers must be thread-safe.
     """
     doc = Document()
     pdf = fitz.open(path)
+    total_pages = len(pdf)
 
     for page_num, page in enumerate(pdf):
-        # Yield the GIL every 10 pages so the main-thread event loop stays
+        # Yield the GIL every 20 pages so the main-thread event loop stays
         # responsive even when processing very large documents.
-        if page_num and page_num % 10 == 0:
+        if page_num % 20 == 0:
             time.sleep(0)
+            if progress_cb:
+                progress_cb(page_num, total_pages)
         # -------------------------------------------------------------
         # 1. Annotation-based detection (StrikeOut / Underline)
         # -------------------------------------------------------------

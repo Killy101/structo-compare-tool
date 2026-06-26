@@ -1,5 +1,6 @@
 import concurrent.futures
 import os
+import threading
 import traceback
 
 from PySide6.QtWidgets import (
@@ -44,11 +45,29 @@ class _CompareWorker(QThread):
     def run(self):
         try:
             self.progress.emit('Extracting PDFs…', 5)
+
+            # Thread-safe page-progress tracking for both PDFs running in parallel.
+            # We don't know total pages upfront so we use a rolling counter.
+            _lock = threading.Lock()
+            _pages = [0, 0]    # [old_pages_done, new_pages_done]
+            _totals = [0, 0]   # [old_total, new_total]
+
+            def _make_cb(slot):
+                def _cb(page_num, total_pages):
+                    with _lock:
+                        _pages[slot]  = page_num
+                        _totals[slot] = total_pages
+                        done  = _pages[0]  + _pages[1]
+                        total = max(_totals[0] + _totals[1], 1)
+                        pct   = 5 + min(50, done * 50 // total)
+                    self.progress.emit(
+                        f'Extracting… page {done:,} of ~{total:,}', pct)
+                return _cb
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
-                old_fut = pool.submit(extract_pdf, self.old_path)
-                new_fut = pool.submit(extract_pdf, self.new_path)
+                old_fut = pool.submit(extract_pdf, self.old_path, _make_cb(0))
+                new_fut = pool.submit(extract_pdf, self.new_path, _make_cb(1))
                 self.old_doc = old_fut.result()
-                self.progress.emit('Old PDF extracted…', 40)
                 self.new_doc = new_fut.result()
 
             # Build a plain-text preview here (worker thread) so the main thread
@@ -57,7 +76,9 @@ class _CompareWorker(QThread):
             # phase entirely — setPlainText() on megabytes of text would freeze
             # the main thread for 10-30 s, which is worse than staying on the
             # processing screen.
-            total_blocks = len(self.old_doc.blocks) + len(self.new_doc.blocks)
+            old_b = len(self.old_doc.blocks)
+            new_b = len(self.new_doc.blocks)
+            total_blocks = old_b + new_b
             _PREVIEW_CAP = 3_000   # blocks; ~150 pages
             _CHAR_CAP    = 80_000  # characters; ~40 KB per panel
             if total_blocks <= _PREVIEW_CAP:
@@ -74,7 +95,7 @@ class _CompareWorker(QThread):
                 self.extracted.emit()   # show plain text immediately before diff
             else:
                 self.progress.emit(
-                    f'Large document ({total_blocks // 2:,} blocks/PDF) — '
+                    f'PDFs extracted ({old_b:,} + {new_b:,} blocks) — '
                     'computing diff…', 55)
 
             self.progress.emit('Computing diff…', 65)
