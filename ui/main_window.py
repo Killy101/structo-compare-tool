@@ -542,6 +542,7 @@ class MainWindow(QMainWindow):
         self._new_diff_html:    str = ''
         self._old_path:         str = ''
         self._new_path:         str = ''
+        self._xml_baseline:     str = ''   # XML text as loaded — before any user edits
         self._worker:           _CompareWorker | None = None
         self._pdf_worker:       _PdfRenderWorker | None = None
         self._xml_worker:       _XmlLoadWorker | None = None
@@ -987,6 +988,7 @@ class MainWindow(QMainWindow):
         self._new_path = ''
         self._changes = []
         self._change_index = -1
+        self._xml_baseline = ''
         self._view_raw = False
         self._pdf_zoom = 2.0
 
@@ -1085,6 +1087,7 @@ class MainWindow(QMainWindow):
 
     def _on_xml_loaded(self, raw_xml: str):
         self.xml_editor.setPlainText(raw_xml)
+        self._xml_baseline = raw_xml   # Snapshot before any user edits
         self._xml_loaded = True
         self._set_saved_state('XML loaded — not yet saved')
         self._xml_worker = None
@@ -1251,8 +1254,9 @@ class MainWindow(QMainWindow):
         self.btn_export.setMenu(menu)
 
     def _export_html(self):
-        if self._old_doc is None:
-            self._status.showMessage('Run a comparison first before exporting.')
+        if not self._xml_baseline:
+            self._status.showMessage(
+                'No XML baseline found — upload an XML file first.')
             return
         path, _ = QFileDialog.getSaveFileName(
             self, 'Save Explanation HTML', '',
@@ -1267,218 +1271,287 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._status.showMessage(f'Export error: {e}')
 
-    def _xml_paragraphs(self) -> list:
-        """Extract plain-text paragraphs from the XML editor content.
+    def _extract_xml_paras(self, xml_text: str) -> list:
+        """Return list of (plain_text, section_context, kind) tuples.
 
-        Walks the lxml tree and collects all text nodes, collapsing each
-        leaf block (p, innodReplace, heading-like elements, list items) into
-        one entry.  Returns an empty list when the editor is blank or the
-        XML is not parseable.
+        Walks the lxml element tree and emits one entry per block-level
+        node (paragraph, list item, heading).  Headings update the running
+        section_context carried into subsequent paragraphs so the caller can
+        group changes under the correct section header.
+
+        kind is ``'heading'`` | ``'para'`` | ``'list'``.
         """
-        raw = self.xml_editor.toPlainText().strip()
-        if not raw:
+        if not xml_text.strip():
             return []
+        from lxml import etree as _et
         try:
-            from lxml import etree as _et
-            root = _et.fromstring(raw.encode('utf-8'))
+            root = _et.fromstring(xml_text.encode('utf-8'))
         except Exception:
             try:
-                from lxml import etree as _et
-                raw_wrapped = f'<root>{raw}</root>'
-                root = _et.fromstring(raw_wrapped.encode('utf-8'))
+                root = _et.fromstring(f'<root>{xml_text}</root>'.encode('utf-8'))
             except Exception:
                 return []
 
-        _BLOCK_TAGS = frozenset({
-            'p', 'para', 'paragraph', 'heading', 'h', 'h1', 'h2', 'h3',
-            'h4', 'h5', 'h6', 'title', 'li', 'item', 'innodheading',
-            'innodreplace',
+        _HEADING = frozenset({
+            'innodheading', 'title', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+            'heading', 'h',
+        })
+        _PARA = frozenset({'p', 'para', 'paragraph'})
+        _LIST = frozenset({'li', 'item'})
+        _SKIP = frozenset({
+            'innodmeta', 'innodimg', 'innodfootnote', 'innodfootnoteref',
+            'footnoteref',
         })
 
-        paragraphs = []
+        result = []
+        ctx = ['']   # mutable cell — current section heading text
 
-        def _collect_text(el):
-            parts = []
-            if el.text:
-                parts.append(el.text.strip())
-            for child in el:
-                local = (child.tag.split('}', 1)[-1] if '}' in child.tag
-                         else child.tag).lower()
-                if local in _BLOCK_TAGS:
-                    txt = ' '.join(child.itertext()).strip()
-                    if txt:
-                        paragraphs.append(txt)
-                    if child.tail and child.tail.strip():
-                        parts.append(child.tail.strip())
-                else:
-                    sub = ' '.join(child.itertext()).strip()
-                    if sub:
-                        parts.append(sub)
-                    if child.tail and child.tail.strip():
-                        parts.append(child.tail.strip())
-            return ' '.join(p for p in parts if p)
+        def _loc(el):
+            tag = el.tag
+            if not isinstance(tag, str):
+                return ''
+            return (tag.split('}', 1)[-1] if '}' in tag else tag).lower()
 
         def _walk(el):
-            local = (el.tag.split('}', 1)[-1] if '}' in el.tag
-                     else el.tag).lower()
-            if local in _BLOCK_TAGS:
+            loc = _loc(el)
+            if not loc or loc in _SKIP:
+                return
+            if loc in _HEADING:
                 txt = ' '.join(el.itertext()).strip()
                 if txt:
-                    paragraphs.append(txt)
-            else:
-                txt = _collect_text(el)
-                if txt and not any(c for c in el if True):
-                    paragraphs.append(txt)
-                for child in el:
-                    _walk(child)
+                    ctx[0] = txt
+                    result.append((txt, txt, 'heading'))
+                return      # itertext already captured all descendant text
+            if loc in _PARA:
+                txt = ' '.join(el.itertext()).strip()
+                if txt:
+                    result.append((txt, ctx[0], 'para'))
+                return
+            if loc in _LIST:
+                txt = ' '.join(el.itertext()).strip()
+                if txt:
+                    result.append((txt, ctx[0], 'list'))
+                return
+            for child in el:
+                _walk(child)
 
         _walk(root)
 
-        # Fallback: if structured walk produced nothing, pull all text runs
-        if not paragraphs:
+        if not result:
             for line in ' '.join(root.itertext()).splitlines():
                 line = line.strip()
                 if line:
-                    paragraphs.append(line)
+                    result.append((line, '', 'para'))
 
-        return [p for p in paragraphs if p]
-
-    def _xml_doc_path(self) -> str:
-        """Extract the document path from innodMeta tags in the XML editor."""
-        raw = self.xml_editor.toPlainText().strip()
-        if not raw:
-            return ''
-        try:
-            from lxml import etree as _et
-            try:
-                root = _et.fromstring(raw.encode('utf-8'))
-            except Exception:
-                root = _et.fromstring(f'<root>{raw}</root>'.encode('utf-8'))
-            # Look for innodMeta with name containing 'path' or 'url'
-            for el in root.iter():
-                local = (el.tag.split('}', 1)[-1] if '}' in el.tag
-                         else el.tag).lower()
-                if local == 'innodmeta':
-                    name = (el.get('name') or '').lower()
-                    if 'path' in name or 'url' in name or 'href' in name:
-                        return el.get('value') or el.get('name') or ''
-        except Exception:
-            pass
-        return ''
+        return result
 
     def _build_explanation_html(self) -> str:
-        """Build WF2-format explanation HTML comparing old PDF text vs XML editor content."""
+        """Build WF2-format explanation HTML from XML baseline vs current editor.
+
+        The explanation reflects only the edits the user made in the XML editor
+        (baseline at load time vs. current content).  PDF comparison results
+        are not used here.
+        """
         import difflib
         import html as _h
 
-        def _para_text(block):
-            return ' '.join(sp.text for sp in block.spans).strip()
+        old_paras = self._extract_xml_paras(self._xml_baseline)
+        new_paras = self._extract_xml_paras(self.xml_editor.toPlainText())
 
-        old_paras = [_para_text(b) for b in self._old_doc.blocks
-                     if not b.is_blank() and _para_text(b)]
+        old_texts = [p[0] for p in old_paras]
+        new_texts = [p[0] for p in new_paras]
 
-        xml_paras = self._xml_paragraphs()
-        if xml_paras:
-            new_paras = xml_paras
-        elif self._new_doc is not None:
-            new_paras = [_para_text(b) for b in self._new_doc.blocks
-                         if not b.is_blank() and _para_text(b)]
-        else:
-            new_paras = old_paras[:]
-
-        def _word_spans(old_t, new_t):
+        def _word_spans(old_t: str, new_t: str) -> str:
             old_w = old_t.split()
             new_w = new_t.split()
             m = difflib.SequenceMatcher(None, old_w, new_w, autojunk=False)
             parts = []
             for tag, i1, i2, j1, j2 in m.get_opcodes():
                 if tag == 'equal':
-                    for w in old_w[i1:i2]:
-                        parts.append(f'<span class="unchanged">{_h.escape(w)}</span> ')
+                    parts.append(_h.escape(' '.join(old_w[i1:i2])) + ' ')
                 elif tag == 'insert':
                     for w in new_w[j1:j2]:
                         parts.append(f'<span class="inserted">{_h.escape(w)}</span>')
                 elif tag == 'delete':
                     for w in old_w[i1:i2]:
                         parts.append(f'<span class="deleted">{_h.escape(w)}</span>')
-                else:  # replace
+                else:
                     for w in old_w[i1:i2]:
                         parts.append(f'<span class="deleted">{_h.escape(w)}</span>')
                     for w in new_w[j1:j2]:
                         parts.append(f'<span class="inserted">{_h.escape(w)}</span>')
             return ''.join(parts)
 
-        # Build path line from document path + title paragraph
-        doc_path = self._xml_doc_path()
-        old_title = old_paras[0] if old_paras else ''
-        new_title = new_paras[0] if new_paras else ''
+        body_parts: list = []
+        last_section: str = ''
+        change_count = 0
 
-        if doc_path:
-            prefix = f'<span class="unchanged">{_h.escape(doc_path)}</span> '
-        else:
-            prefix = ''
-
-        if old_title == new_title:
-            title_spans = f'<span class="unchanged">{_h.escape(old_title)}</span>'
-        else:
-            title_spans = _word_spans(old_title, new_title)
-
-        path_html = f'<p class="path">{prefix}{title_spans} </p>\n'
-
-        # Paragraph-level diff on body (everything after title)
-        old_body = old_paras[1:]
-        new_body = new_paras[1:]
-        body_parts = []
+        def _maybe_section(section: str) -> None:
+            nonlocal last_section
+            if section and section != last_section:
+                body_parts.append(
+                    f'<div class="section-context">📍 {_h.escape(section)}</div>\n')
+                last_section = section
 
         for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
-                None, old_body, new_body, autojunk=False).get_opcodes():
+                None, old_texts, new_texts, autojunk=False).get_opcodes():
+
             if tag == 'equal':
-                for p in old_body[i1:i2]:
-                    body_parts.append(f'<p class="unchanged">{_h.escape(p)}</p>\n')
-            elif tag == 'insert':
-                for p in new_body[j1:j2]:
-                    body_parts.append(f'<p class="inserted">{_h.escape(p)}</p>\n')
+                continue   # Unchanged content is not part of the explanation
+
+            if tag == 'insert':
+                for j in range(j1, j2):
+                    text, section, _ = new_paras[j]
+                    _maybe_section(section)
+                    body_parts.append(
+                        f'<p class="inserted">{_h.escape(text)}</p>\n')
+                    change_count += 1
+
             elif tag == 'delete':
-                for p in old_body[i1:i2]:
-                    body_parts.append(f'<p class="deleted">{_h.escape(p)}</p>\n')
-            else:  # replace — word-level diff per paired paragraph
-                og = old_body[i1:i2]
-                ng = new_body[j1:j2]
+                for i in range(i1, i2):
+                    text, section, _ = old_paras[i]
+                    _maybe_section(section)
+                    body_parts.append(
+                        f'<p class="deleted">{_h.escape(text)}</p>\n')
+                    change_count += 1
+
+            else:  # replace — word-level diff on paired paragraphs
+                og = old_paras[i1:i2]
+                ng = new_paras[j1:j2]
                 for k in range(max(len(og), len(ng))):
                     if k < len(og) and k < len(ng):
-                        if og[k] == ng[k]:
-                            body_parts.append(
-                                f'<p class="unchanged">{_h.escape(og[k])}</p>\n')
-                        else:
-                            body_parts.append(
-                                f'<p>{_word_spans(og[k], ng[k])} </p>\n')
+                        _, section, _ = ng[k]
+                        _maybe_section(section)
+                        body_parts.append(
+                            f'<p>{_word_spans(og[k][0], ng[k][0])} </p>\n')
                     elif k < len(og):
+                        text, section, _ = og[k]
+                        _maybe_section(section)
                         body_parts.append(
-                            f'<p class="deleted">{_h.escape(og[k])}</p>\n')
+                            f'<p class="deleted">{_h.escape(text)}</p>\n')
                     else:
+                        text, section, _ = ng[k]
+                        _maybe_section(section)
                         body_parts.append(
-                            f'<p class="inserted">{_h.escape(ng[k])}</p>\n')
+                            f'<p class="inserted">{_h.escape(text)}</p>\n')
+                    change_count += 1
 
-        css = (
-            'div {\n    margin: 1em;\n    padding: 1em;\n}\n\n'
-            'div.addition {\n    border: 10pt solid lightgreen;\n}\n\n'
-            'div.removal {\n    border: 10pt solid lightpink;\n}\n\n'
-            'div.modification {\n    border: 10pt solid yellow;\n}\n\n'
-            'div.modification.path {\n    border: 10pt solid blue;\n}\n\n'
-            'div.modification.path-content {\n    border: 10pt solid magenta;\n}\n\n'
-            'p.path {\n    background-color: white;\n    font-weight: bold;\n'
-            '    font-family: monospace;\n}\n\n'
-            '.inserted {\n    background-color: greenyellow;\n}\n\n'
-            '.deleted {\n    background-color: hotpink;\n'
-            '    text-decoration: line-through;\n}'
-        )
+        xml_name = ''
+        up = getattr(self, '_upload_page', None)
+        if up and getattr(up, 'xml_path', ''):
+            xml_name = os.path.basename(up.xml_path)
+        title_esc = _h.escape(xml_name or 'Explanation')
+
+        if body_parts:
+            summary = (
+                f'<p style="font-size:11px;color:#555;margin-bottom:1em">'
+                f'{change_count} change{"s" if change_count != 1 else ""} '
+                f'documented</p>\n'
+            )
+            content = summary + ''.join(body_parts)
+        else:
+            content = (
+                '<div class="no-changes">No changes detected — the XML '
+                'content matches the version that was originally loaded.</div>\n'
+            )
+
+        css = """body {
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #111;
+  background: #fff;
+  margin: 0;
+  padding: 0;
+}
+
+div.doc-wrapper {
+  margin: 1em;
+  padding: 1em;
+  border: 10pt solid magenta;
+}
+
+p {
+  margin: 0.6em 0;
+}
+
+p.inserted {
+  background-color: #bbf7d0;
+  border-left: 6px solid #22c55e;
+  padding-left: 6px;
+}
+
+p.deleted {
+  background-color: #fecdd3;
+  border-left: 6px solid #f43f5e;
+  padding-left: 6px;
+  text-decoration: line-through;
+  text-decoration-color: #f43f5e;
+  opacity: 0.85;
+}
+
+p.unchanged {
+  /* no highlight */
+}
+
+span.inserted {
+  background-color: #bbf7d0;
+  outline: 1.5px solid #22c55e;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+span.deleted {
+  background-color: #fecdd3;
+  outline: 1.5px solid #f43f5e;
+  border-radius: 2px;
+  padding: 0 1px;
+  text-decoration: line-through;
+  text-decoration-color: #f43f5e;
+}
+
+span.unchanged {
+  /* no highlight */
+}
+
+.fmt-underline { text-decoration: underline; }
+.fmt-strike    { text-decoration: line-through; }
+
+span.fmt-changed {
+  outline: 1.5px solid #f59e0b;
+  border-radius: 2px;
+  padding: 0 1px;
+  background-color: #fef9c3;
+}
+
+.section-context {
+  margin: 1.4em 0 0.4em;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #555;
+  background: #f0f0f0;
+  border-left: 4px solid #aaa;
+  border-radius: 2px;
+}
+
+.no-changes {
+  padding: 1em;
+  background: #f0fdf4;
+  border: 1px solid #22c55e;
+  border-radius: 4px;
+  color: #15803d;
+}"""
 
         return (
             "<?xml version='1.0' encoding='utf-8'?>\n"
-            f'<html><head><style>\n{css}\n</style></head><body>'
-            f'<div class="modification path-content">{path_html}\n'
-            f'{"".join(body_parts)}\n'
-            f'</div></body></html>'
+            f'<html>\n<head>\n<meta charset="utf-8" />\n'
+            f'<title>{title_esc}</title>\n'
+            f'<style>\n{css}\n</style>\n'
+            f'</head>\n<body>\n'
+            f'<div class="doc-wrapper">\n\n'
+            f'{content}\n'
+            f'</div>\n</body>\n</html>'
         )
 
     # ── Sync scroll ───────────────────────────────────────────────────────────
