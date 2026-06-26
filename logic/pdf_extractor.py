@@ -358,7 +358,7 @@ def render_pdf_preview(path: str, zoom: float = 2.0, max_pages: int = 80) -> str
             f'<p style="color:#cbd5e1;font-size:10px;margin:0 0 6px">Page {i+1} of {n_pages}</p>'
             f'<img src="data:image/png;base64,{b64}" '
             f'style="max-width:98%;background:#fff;'
-            f'box-shadow:0 3px 12px rgba(0,0,0,0.55);border:1px solid #1e293b;" />'
+            f'border:2px solid #1e293b;" />'
             f"</div>"
         )
     if len(pdf) > max_pages:

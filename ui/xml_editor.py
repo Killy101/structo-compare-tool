@@ -821,7 +821,7 @@ class _XmlCompleter(QFrame):
         self._editor = editor
         self.setStyleSheet(
             'QFrame{background:#ffffff;border:1px solid #cbd5e1;'
-            'border-radius:5px;box-shadow:0 2px 8px rgba(0,0,0,0.12);}'
+            'border-radius:5px;}'
         )
         self.setFixedWidth(400)
 
