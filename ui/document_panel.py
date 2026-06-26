@@ -1,5 +1,5 @@
 # ui/document_panel.py
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QTextEdit
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QProgressBar
 from PySide6.QtGui import QTextCursor, QColor
 from PySide6.QtCore import Qt, QTimer
 
@@ -15,7 +15,9 @@ _CSS = """
     color: #1a1a1a;
     background: #ffffff;
   }
-  p { margin: 4px 0; }
+  /* .bl is used by differ._p() for every unchanged paragraph so the style
+     lives here once instead of being repeated inline on 30 000+ elements. */
+  p, .bl { margin: 3px 0; line-height: 1.6; }
 
   b, strong,
   span[style*="font-weight:bold"]   { font-weight: bold; }
@@ -43,8 +45,10 @@ _PLACEHOLDER = _CSS + """
 _STYLE_VIEW = 'background:#ffffff;border:none;'
 
 # Load the first chunk synchronously, defer the rest via QTimer so the UI
-# stays responsive on large documents. Tuned to roughly 80 KB of HTML.
-_CHUNK_CHARS = 80_000
+# stays responsive on large documents.  200 KB per chunk gives a good
+# balance: fewer round-trips through the event loop while still letting
+# Qt paint/process input events between chunks.
+_CHUNK_CHARS = 200_000
 
 
 class DocumentPanel(QWidget):
@@ -68,7 +72,19 @@ class DocumentPanel(QWidget):
         self.browser.setHtml(_PLACEHOLDER)
         layout.addWidget(self.browser)
 
+        # Thin progress bar shown while large documents stream into the panel.
+        self._prog = QProgressBar()
+        self._prog.setTextVisible(False)
+        self._prog.setFixedHeight(3)
+        self._prog.setStyleSheet(
+            'QProgressBar{border:none;background:#e2e8f0;}'
+            'QProgressBar::chunk{background:#6366f1;}'
+        )
+        self._prog.hide()
+        layout.addWidget(self._prog)
+
         self._load_gen = 0   # incremented on every set_html(); stale deferred chunks bail out
+        self._load_total = 0
 
     # -------------------------------------------------------------------
     def set_html(self, content: str):
@@ -80,11 +96,18 @@ class DocumentPanel(QWidget):
         gen = self._load_gen
 
         if len(content) <= _CHUNK_CHARS:
+            self._prog.hide()
             self.browser.setHtml(
                 f'<html><head>{_CSS}</head><body>{content}</body></html>'
             )
             sb.setValue(min(saved_pos, sb.maximum()))
             return
+
+        # Show a thin progress bar while the rest streams in.
+        self._load_total = len(content)
+        self._prog.setMaximum(self._load_total)
+        self._prog.setValue(0)
+        self._prog.show()
 
         # Load the first chunk now so the panel shows content immediately,
         # then schedule the remainder via zero-delay timers so Qt can process
@@ -97,14 +120,18 @@ class DocumentPanel(QWidget):
             f'<html><head>{_CSS}</head><body>{first}</body></html>'
         )
         sb.setValue(min(saved_pos, sb.maximum()))
+        self._prog.setValue(len(first))
 
         if rest:
             QTimer.singleShot(0, lambda: self._append_html(rest, gen))
+        else:
+            self._prog.hide()
 
     # -------------------------------------------------------------------
     def _append_html(self, fragment: str, gen: int):
         """Append one chunk of HTML at the document's end, then reschedule."""
         if gen != self._load_gen:
+            self._prog.hide()
             return   # a newer set_html() was called; discard stale work
 
         if len(fragment) <= _CHUNK_CHARS:
@@ -120,8 +147,13 @@ class DocumentPanel(QWidget):
         cur.movePosition(QTextCursor.MoveOperation.End)
         cur.insertHtml(to_add)
 
+        loaded = self._load_total - len(rest) if self._load_total else 0
+        self._prog.setValue(loaded)
+
         if rest:
             QTimer.singleShot(0, lambda: self._append_html(rest, gen))
+        else:
+            self._prog.hide()
 
     # -------------------------------------------------------------------
     def set_plain(self, text: str):

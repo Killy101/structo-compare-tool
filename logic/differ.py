@@ -213,12 +213,17 @@ def _p(inner: str, indent: int = 0, bg: str = "") -> str:
 
     *bg* is an optional paragraph-level background band colour rendered when
     the paragraph contains at least one changed word.
+
+    Unchanged paragraphs use class="bl" so the shared style lives once in the
+    <head> CSS instead of being repeated inline on every element (saves ~800 KB
+    per panel for large documents).  Changed paragraphs keep inline style so the
+    dynamic background colour is applied correctly.
     """
     pad = "&nbsp;" * indent if indent else ""
-    style = "margin:3px 0;line-height:1.6"
     if bg:
-        style += f";background:{bg};padding:2px 6px;border-radius:3px"
-    return f'<p style="{style}">{pad}{inner}</p>\n'
+        style = f'style="margin:3px 0;line-height:1.6;background:{bg};padding:2px 6px;border-radius:3px"'
+        return f'<p {style}>{pad}{inner}</p>\n'
+    return f'<p class="bl">{pad}{inner}</p>\n'
 
 
 def _render_panel(blocks: List[TextBlock], changed: List[bool],
