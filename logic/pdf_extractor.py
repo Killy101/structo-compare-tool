@@ -308,14 +308,26 @@ def extract_pdf(path: str) -> Document:
     return doc
 
 
+_render_cache: dict = {}   # (path, zoom_key) -> html string
+
+
 def render_pdf_preview(path: str, zoom: float = 2.0, max_pages: int = 80) -> str:
     """
     Render the first ``max_pages`` pages of *path* as PNG data-URIs and wrap them
     in a small HTML fragment.  Used by the "PDF Page View" toggle so the user can
     see the **real layout** of the source file.  ``zoom`` is the render scale
     (higher = sharper but heavier); the UI drives it via zoom controls.
+
+    Results are cached by (path, rounded-zoom) so repeated zoom requests at the
+    same level reuse previously rendered pages without re-opening the PDF.
     """
     import base64
+    # Round zoom to 1 decimal place for cache keying (0.5, 0.6, … 4.0)
+    zoom_key = round(zoom, 1)
+    cache_key = (path, zoom_key)
+    if cache_key in _render_cache:
+        return _render_cache[cache_key]
+
     pdf = fitz.open(path)
 
     n_pages = min(len(pdf), max_pages)
@@ -348,4 +360,15 @@ def render_pdf_preview(path: str, zoom: float = 2.0, max_pages: int = 80) -> str
         )
     pdf.close()
     parts.append("</div>")
-    return "".join(parts)
+    html = "".join(parts)
+
+    # Cache the result (evict oldest if cache grows too large)
+    if len(_render_cache) >= 20:
+        _render_cache.pop(next(iter(_render_cache)))
+    _render_cache[cache_key] = html
+    return html
+
+
+def clear_render_cache():
+    """Discard all cached PDF preview renders (e.g. when loading new files)."""
+    _render_cache.clear()

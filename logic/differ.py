@@ -220,7 +220,10 @@ def build_diff_html(old_doc: Document, new_doc: Document) -> Tuple[str, str, str
     old_words = _flatten(old_blocks)
     new_words = _flatten(new_blocks)
 
-    matcher = difflib.SequenceMatcher(None, old_words, new_words, autojunk=False)
+    # Enable autojunk only for very large documents (>5 000 words on either side)
+    # to keep O(n²) SequenceMatcher manageable while preserving accuracy on small docs.
+    use_autojunk = len(old_words) > 5_000 or len(new_words) > 5_000
+    matcher = difflib.SequenceMatcher(None, old_words, new_words, autojunk=use_autojunk)
 
     old_changed = [False] * len(old_words)
     new_changed = [False] * len(new_words)

@@ -381,28 +381,68 @@ class _FindReplaceDialog(QDialog):
 class _ShortcutsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle('Keyboard Shortcuts')
+        self.setWindowTitle('XML Editor — Keyboard Shortcuts')
         self.setModal(True)
-        self.resize(420, 260)
+        self.resize(520, 460)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
         layout.setContentsMargins(12, 12, 12, 12)
 
-        shortcuts = (
-            'Ctrl+Shift+F   Format XML\n'
-            'Ctrl+F         Find\n'
-            'Ctrl+H         Replace\n'
-            'Ctrl+G         Go to Line\n'
-            'Ctrl+/         Toggle comment\n'
-            'Ctrl+Z         Undo\n'
-            'Ctrl+Y         Redo\n'
-            'F1             Show shortcuts'
-        )
+        def _section(title: str, rows: list) -> str:
+            header = (f'<tr><td colspan="2" style="padding:8px 4px 2px;'
+                      f'color:#6366f1;font-weight:bold;font-size:12px">{title}</td></tr>')
+            cells = ''.join(
+                f'<tr>'
+                f'<td style="padding:2px 12px 2px 4px;color:#0451a5;font-family:monospace;'
+                f'white-space:nowrap">{k}</td>'
+                f'<td style="padding:2px 4px;color:#334155">{v}</td>'
+                f'</tr>'
+                for k, v in rows
+            )
+            return header + cells
 
-        label = QLabel(f'<pre>{shortcuts}</pre>')
-        label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(label)
+        html = '<table style="font-size:12px;border-collapse:collapse;width:100%">'
+        html += _section('General', [
+            ('Ctrl+S',         'Format XML and Save'),
+            ('Ctrl+Shift+F',   'Format XML (pretty-print only)'),
+            ('Ctrl+Shift+E',   'Wrap selection with &lt;innodReplace userEdit&gt;'),
+            ('Ctrl+Z',         'Undo'),
+            ('Ctrl+Y',         'Redo'),
+            ('Ctrl+F',         'Find'),
+            ('Ctrl+H',         'Find &amp; Replace'),
+            ('Ctrl+G',         'Go to Line'),
+            ('Ctrl+/',         'Toggle XML comment'),
+            ('F1',             'Show this shortcuts reference'),
+        ])
+        html += _section('Emphasis (inline tags)', [
+            ('Alt+B',          'Wrap selection with &lt;b&gt; (Bold)'),
+            ('Alt+I',          'Wrap selection with &lt;i&gt; (Italic)'),
+            ('Alt+U',          'Wrap selection with &lt;u&gt; (Underline)'),
+            ('Alt+S',          'Wrap selection with &lt;s&gt; (Strikethrough)'),
+        ])
+        html += _section('Structure (block tags)', [
+            ('Alt+P',          'Wrap with &lt;p&gt; (Paragraph)'),
+            ('Alt+L',          'Wrap with &lt;li&gt; (List item)'),
+            ('Alt+Q',          'Wrap with &lt;blockquote&gt; (Quote)'),
+            ('Alt+H',          'Wrap with &lt;h&gt; (Heading)'),
+            ('Alt+F',          'Wrap with &lt;fn&gt; (Footnote)'),
+            ('Alt+T',          'Wrap with &lt;table&gt; (Table)'),
+            ('Alt+M',          'Wrap with &lt;meta&gt; (Metadata)'),
+            ('Alt+6',          'Wrap with &lt;h1&gt; (Heading level 1)'),
+            ('Alt+7',          'Wrap with &lt;h2&gt; (Heading level 2)'),
+        ])
+        html += '</table>'
+
+        from PySide6.QtWidgets import QScrollArea
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet('QScrollArea{border:none;}')
+        inner = QLabel(html)
+        inner.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        inner.setWordWrap(True)
+        scroll.setWidget(inner)
+        layout.addWidget(scroll)
 
         close_btn = QPushButton('Close')
         close_btn.clicked.connect(self.accept)
@@ -500,6 +540,40 @@ class XmlEditor(QWidget):
         QShortcut(QKeySequence('Ctrl+G'),       self).activated.connect(self._goto_line)
         QShortcut(QKeySequence('Ctrl+/'),       self).activated.connect(self._toggle_comment)
         QShortcut(QKeySequence('F1'),           self).activated.connect(self._show_shortcuts)
+
+        # ── WF2 parity: emphasis tag shortcuts ────────────────────────
+        QShortcut(QKeySequence('Alt+B'), self).activated.connect(
+            lambda: self._wrap_with_tag('b'))
+        QShortcut(QKeySequence('Alt+I'), self).activated.connect(
+            lambda: self._wrap_with_tag('i'))
+        QShortcut(QKeySequence('Alt+U'), self).activated.connect(
+            lambda: self._wrap_with_tag('u'))
+        QShortcut(QKeySequence('Alt+S'), self).activated.connect(
+            lambda: self._wrap_with_tag('s'))
+
+        # ── WF2 parity: innodReplace wrap ─────────────────────────────
+        QShortcut(QKeySequence('Ctrl+Shift+E'), self).activated.connect(
+            lambda: self._wrap_with_tag('innodReplace', 'userEdit="true"'))
+
+        # ── WF2 parity: structure tag shortcuts ───────────────────────
+        QShortcut(QKeySequence('Alt+P'), self).activated.connect(
+            lambda: self._wrap_with_tag('p'))
+        QShortcut(QKeySequence('Alt+L'), self).activated.connect(
+            lambda: self._wrap_with_tag('li'))
+        QShortcut(QKeySequence('Alt+Q'), self).activated.connect(
+            lambda: self._wrap_with_tag('blockquote'))
+        QShortcut(QKeySequence('Alt+H'), self).activated.connect(
+            lambda: self._wrap_with_tag('h'))
+        QShortcut(QKeySequence('Alt+F'), self).activated.connect(
+            lambda: self._wrap_with_tag('fn'))
+        QShortcut(QKeySequence('Alt+T'), self).activated.connect(
+            lambda: self._wrap_with_tag('table'))
+        QShortcut(QKeySequence('Alt+M'), self).activated.connect(
+            lambda: self._wrap_with_tag('meta'))
+        QShortcut(QKeySequence('Alt+6'), self).activated.connect(
+            lambda: self._wrap_with_tag('h1'))
+        QShortcut(QKeySequence('Alt+7'), self).activated.connect(
+            lambda: self._wrap_with_tag('h2'))
 
         # Find‑replace dialog lives lazily
         self._find_dlg: _FindReplaceDialog | None = None
@@ -609,3 +683,37 @@ class XmlEditor(QWidget):
 
     def _show_shortcuts(self):
         _ShortcutsDialog(self).exec()
+
+    # -------------------------------------------------------------------
+    # Tag wrapping (WF2 parity)
+    # -------------------------------------------------------------------
+    def _wrap_with_tag(self, tag: str, attrs: str = ''):
+        """Wrap the current selection with *tag* (or insert empty tag at cursor).
+
+        If text is selected, wraps it: ``<tag attrs>selected</tag>``.
+        If nothing is selected, inserts ``<tag attrs></tag>`` and places the
+        cursor between the open and close tags ready for typing.
+        Groups the edit as a single undo step.
+        """
+        cur = self._edit.textCursor()
+        open_tag  = f'<{tag}{(" " + attrs) if attrs else ""}>'
+        close_tag = f'</{tag}>'
+
+        cur.beginEditBlock()
+        if cur.hasSelection():
+            selected = cur.selectedText()
+            cur.insertText(f'{open_tag}{selected}{close_tag}')
+        else:
+            cur.insertText(f'{open_tag}{close_tag}')
+            # Place caret between open and close tags
+            pos = cur.position() - len(close_tag)
+            cur.setPosition(pos)
+            self._edit.setTextCursor(cur)
+        cur.endEditBlock()
+
+    # -------------------------------------------------------------------
+    # Public API: format (called by MainWindow Ctrl+S)
+    # -------------------------------------------------------------------
+    def format_xml(self):
+        """Pretty-print the XML in-place (no-op if invalid)."""
+        self._format_xml()

@@ -5,13 +5,14 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget,
     QSplitter, QPushButton, QFileDialog, QStatusBar,
     QLabel, QTextBrowser, QProgressBar, QCheckBox, QFrame, QLineEdit,
+    QApplication,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QUrl
-from PySide6.QtGui import QKeySequence, QShortcut, QTextDocument
+from PySide6.QtGui import QKeySequence, QShortcut, QTextDocument, QColor, QPalette
 
 from ui.document_panel import DocumentPanel
 from ui.xml_editor import XmlEditor
-from logic.pdf_extractor import extract_pdf, render_pdf_preview
+from logic.pdf_extractor import extract_pdf, render_pdf_preview, clear_render_cache
 from logic.xml_extractor import extract_xml
 from logic.differ import build_diff_html
 from models.document import Document
@@ -51,6 +52,29 @@ class _CompareWorker(QThread):
 
             self.progress.emit('Done', 100)
             self.done.emit()
+        except Exception as exc:
+            self.error.emit(str(exc) + '\n\n' + traceback.format_exc())
+
+
+# ---------------------------------------------------------------------------
+# Background worker — renders PDF pages for the "PDF Page View" mode
+# ---------------------------------------------------------------------------
+class _PdfRenderWorker(QThread):
+    progress = Signal(int, int)    # pages rendered, total pages
+    done     = Signal(str, str)    # old_html, new_html
+    error    = Signal(str)
+
+    def __init__(self, old_path: str, new_path: str, zoom: float):
+        super().__init__()
+        self.old_path = old_path
+        self.new_path = new_path
+        self.zoom     = zoom
+
+    def run(self):
+        try:
+            old_html = render_pdf_preview(self.old_path, self.zoom)
+            new_html = render_pdf_preview(self.new_path, self.zoom)
+            self.done.emit(old_html, new_html)
         except Exception as exc:
             self.error.emit(str(exc) + '\n\n' + traceback.format_exc())
 
@@ -391,7 +415,8 @@ class _ProcessingPage(QWidget):
         cl.addWidget(self._status)
 
         self._bar = QProgressBar()
-        self._bar.setRange(0, 0)   # indeterminate / pulsing
+        self._bar.setRange(0, 100)
+        self._bar.setValue(0)
         self._bar.setTextVisible(False)
         self._bar.setFixedHeight(8)
         self._bar.setStyleSheet(
@@ -402,8 +427,13 @@ class _ProcessingPage(QWidget):
 
         outer.addWidget(card)
 
-    def set_status(self, msg: str, _pct: int = 0):
+    def set_status(self, msg: str, pct: int = 0):
         self._status.setText(msg)
+        if pct > 0:
+            self._bar.setRange(0, 100)
+            self._bar.setValue(pct)
+        else:
+            self._bar.setRange(0, 0)   # indeterminate pulsing
 
 
 # ---------------------------------------------------------------------------
@@ -415,18 +445,20 @@ class MainWindow(QMainWindow):
         self.setWindowTitle('Structo Compare — PDF vs PDF + XML Editor')
         self.resize(1600, 920)
 
-        self._old_doc:       Document | None = None
-        self._new_doc:       Document | None = None
-        self._old_diff_html: str = ''
-        self._new_diff_html: str = ''
-        self._old_path:      str = ''
-        self._new_path:      str = ''
-        self._worker:        _CompareWorker | None = None
-        self._view_raw:      bool = False
-        self._scroll_syncing: bool = False
-        self._changes:       list = []
-        self._change_index:  int = -1
-        self._pdf_zoom:      float = 2.0
+        self._old_doc:          Document | None = None
+        self._new_doc:          Document | None = None
+        self._old_diff_html:    str = ''
+        self._new_diff_html:    str = ''
+        self._old_path:         str = ''
+        self._new_path:         str = ''
+        self._worker:           _CompareWorker | None = None
+        self._pdf_worker:       _PdfRenderWorker | None = None
+        self._view_raw:         bool = False
+        self._scroll_syncing:   bool = False
+        self._changes:          list = []
+        self._change_index:     int = -1
+        self._pdf_zoom:         float = 2.0
+        self._dark_mode:        bool = False
 
         self._build_ui()
         self._wire_signals()
@@ -470,11 +502,12 @@ class MainWindow(QMainWindow):
             'color:#1e293b;font-size:17px;font-weight:bold;letter-spacing:1px;'
         )
 
-        self.btn_back     = _btn('＋ New',         '#64748b', '#475569')
-        self.btn_recompare = _btn('⟳ Re-Compare', '#059669', '#047857')
-        self.btn_view     = _btn('PDF Page View',  '#64748b', '#475569')
-        self.btn_export   = _btn('Export ▾',       '#2563eb', '#1d4ed8')
-        self.btn_save     = _btn('Save XML As…',   '#dc2626', '#b91c1c')
+        self.btn_back       = _btn('＋ New',         '#64748b', '#475569')
+        self.btn_recompare  = _btn('⟳ Re-Compare', '#059669', '#047857')
+        self.btn_view       = _btn('PDF Page View',  '#64748b', '#475569')
+        self.btn_export     = _btn('Export ▾',       '#2563eb', '#1d4ed8')
+        self.btn_save       = _btn('Save XML As…',   '#dc2626', '#b91c1c')
+        self.btn_dark_mode  = _btn('☽ Dark',         '#374151', '#1f2937')
 
         self.btn_recompare.setToolTip(
             'Re-run the comparison from the (edited) panel text  ·  Ctrl+R')
@@ -566,6 +599,8 @@ class MainWindow(QMainWindow):
         tb.addWidget(_sep())
         tb.addWidget(self._save_status)
         tb.addWidget(self.btn_save)
+        tb.addWidget(_sep())
+        tb.addWidget(self.btn_dark_mode)
         tb.addWidget(_sep())
         tb.addWidget(self.btn_back)
         root.addWidget(toolbar)
@@ -790,6 +825,9 @@ class MainWindow(QMainWindow):
         self.btn_zoom_in.clicked.connect(lambda: self._adjust_zoom(1.25))
         self.btn_zoom_out.clicked.connect(lambda: self._adjust_zoom(0.8))
 
+        # Dark mode toggle
+        self.btn_dark_mode.clicked.connect(self._toggle_dark_mode)
+
         # Keyboard shortcuts
         QShortcut(QKeySequence('Ctrl+S'), self).activated.connect(self._save_xml)
         QShortcut(QKeySequence('Ctrl+R'), self).activated.connect(self._recompare)
@@ -822,7 +860,7 @@ class MainWindow(QMainWindow):
 
     def _reset_session(self):
         """Clear every piece of session state so the next compare starts clean."""
-        # Stop any running worker so its callbacks can't touch fresh state.
+        # Stop any running workers so callbacks can't touch fresh state.
         if self._worker is not None:
             try:
                 self._worker.done.disconnect()
@@ -835,6 +873,18 @@ class MainWindow(QMainWindow):
                 self._worker.quit()
                 self._worker.wait(2000)
             self._worker = None
+
+        if self._pdf_worker is not None:
+            try:
+                self._pdf_worker.done.disconnect()
+                self._pdf_worker.error.disconnect()
+                self._pdf_worker.progress.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            if self._pdf_worker.isRunning():
+                self._pdf_worker.quit()
+                self._pdf_worker.wait(2000)
+            self._pdf_worker = None
 
         # In-memory results
         self._old_doc = None
@@ -875,6 +925,9 @@ class MainWindow(QMainWindow):
         up = self._upload_page
         if not up.old_path or not up.new_path:
             return
+
+        # Clear any stale PDF render cache from a previous session
+        clear_render_cache()
 
         # Load XML immediately (lightweight)
         if up.xml_path:
@@ -963,21 +1016,57 @@ class MainWindow(QMainWindow):
             self._status.showMessage('PDF Page View needs the original PDF files.')
             self._view_raw = False
             return
-        self._status.showMessage('Rendering PDF pages…')
-        self._zoom_lbl.setText(f'{int(self._pdf_zoom / 2.0 * 100)}%')
-        try:
-            old_frac = self.old_panel.scroll_fraction()
-            new_frac = self.new_panel.scroll_fraction()
-            self.old_panel.set_html(render_pdf_preview(self._old_path, self._pdf_zoom))
-            self.new_panel.set_html(render_pdf_preview(self._new_path, self._pdf_zoom))
-            self.old_panel.set_scroll_fraction(old_frac)
-            self.new_panel.set_scroll_fraction(new_frac)
-            self._status.showMessage(
-                'PDF Page View — true page layout.  Use ＋ / － to zoom, '
-                'Compare View to return.')
-        except Exception as e:
-            self._view_raw = False
-            self._status.showMessage(f'PDF Page View error: {e}')
+
+        # Cancel any previous render
+        if self._pdf_worker is not None and self._pdf_worker.isRunning():
+            self._pdf_worker.quit()
+            self._pdf_worker.wait(1000)
+
+        zoom_pct = int(self._pdf_zoom / 2.0 * 100)
+        self._zoom_lbl.setText(f'{zoom_pct}%')
+        self._status.showMessage(f'Rendering PDF pages at {zoom_pct}%…')
+
+        # Show a loading placeholder while rendering
+        loading_html = (
+            '<div style="padding:40px;text-align:center;color:#94a3b8;'
+            'font-family:Arial;font-size:14px">'
+            '<p style="font-size:24px;margin-bottom:16px">⏳</p>'
+            '<p>Rendering PDF pages…</p>'
+            '<p style="font-size:11px;margin-top:8px;color:#cbd5e1">'
+            'Large documents may take a moment.</p>'
+            '</div>'
+        )
+        self.old_panel.set_html(loading_html)
+        self.new_panel.set_html(loading_html)
+
+        self._pdf_scroll_old = self.old_panel.scroll_fraction()
+        self._pdf_scroll_new = self.new_panel.scroll_fraction()
+
+        self._pdf_worker = _PdfRenderWorker(
+            self._old_path, self._new_path, self._pdf_zoom)
+        self._pdf_worker.progress.connect(self._on_pdf_render_progress)
+        self._pdf_worker.done.connect(self._on_pdf_render_done)
+        self._pdf_worker.error.connect(self._on_pdf_render_error)
+        self._pdf_worker.start()
+
+    def _on_pdf_render_progress(self, current: int, total: int):
+        self._status.showMessage(f'Rendering PDF pages… {current}/{total}')
+
+    def _on_pdf_render_done(self, old_html: str, new_html: str):
+        self.old_panel.set_html(old_html)
+        self.new_panel.set_html(new_html)
+        self.old_panel.set_scroll_fraction(getattr(self, '_pdf_scroll_old', 0.0))
+        self.new_panel.set_scroll_fraction(getattr(self, '_pdf_scroll_new', 0.0))
+        self._status.showMessage(
+            'PDF Page View — true page layout.  Use ＋ / － to zoom, '
+            'Compare View to return.')
+
+    def _on_pdf_render_error(self, msg: str):
+        self._view_raw = False
+        self.btn_view.setText('PDF Page View')
+        for w in self._zoom_widgets:
+            w.setVisible(False)
+        self._status.showMessage(f'PDF Page View error: {msg[:120]}')
 
     def _adjust_zoom(self, factor: float):
         if not self._view_raw:
@@ -1263,6 +1352,18 @@ class MainWindow(QMainWindow):
         else:
             kind, anchor = 'mod', raw   # treat as two-panel nav
 
+        # Update the change counter to reflect the clicked item
+        for i, ch in enumerate(self._changes):
+            if ch['id'] == anchor:
+                self._change_index = i
+                self._update_change_counter()
+                label = {'del': 'Deleted', 'add': 'Added', 'mod': 'Modified'}.get(
+                    ch['kind'], 'Change')
+                n = len(self._changes)
+                self._status.showMessage(
+                    f'Change {i + 1} of {n}  ·  {label}')
+                break
+
         # Route to the correct panel(s):
         #   del → only old panel has the anchor
         #   add → only new panel has the anchor
@@ -1288,6 +1389,8 @@ class MainWindow(QMainWindow):
 
     # ── Save XML ──────────────────────────────────────────────────────────────
     def _save_xml(self):
+        # Format first (no-op if invalid XML), then save — matches Ctrl+S spec
+        self.xml_editor.format_xml()
         path, _ = QFileDialog.getSaveFileName(
             self, 'Save XML As', '',
             'XML Files (*.xml);;All Files (*)'
@@ -1302,6 +1405,49 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._status.showMessage(f'Save error: {e}')
             self._set_saved_state('✕ Save failed', '#f38ba8')
+
+    # ── Dark / light mode ─────────────────────────────────────────────────
+    def _toggle_dark_mode(self):
+        self._dark_mode = not self._dark_mode
+        if self._dark_mode:
+            self.btn_dark_mode.setText('☀ Light')
+            self._apply_dark_theme()
+        else:
+            self.btn_dark_mode.setText('☽ Dark')
+            self._apply_light_theme()
+
+    def _apply_dark_theme(self):
+        dark_bg    = '#1e1e2e'
+        dark_surf  = '#181825'
+        dark_text  = '#cdd6f4'
+        dark_muted = '#a6adc8'
+        dark_border = '#45475a'
+
+        self._work_page.setStyleSheet(f'background:{dark_bg};')
+        self._upload_page.setStyleSheet(f'background:{dark_bg};')
+        self._proc_page.setStyleSheet(f'background:{dark_bg};')
+
+        self._status.setStyleSheet(
+            f'background:{dark_surf};color:{dark_muted};'
+            f'border-top:1px solid {dark_border};font-size:12px;')
+
+        # Sidebar (already dark from Catppuccin CSS, but chrome needs updating)
+        self.sidebar.setStyleSheet(
+            f'background:{dark_surf};color:{dark_text};border:none;'
+            f'border-left:1px solid {dark_border};')
+        self._sidebar_wrap.setStyleSheet(f'background:{dark_surf};')
+
+    def _apply_light_theme(self):
+        self.setStyleSheet('')
+        self._work_page.setStyleSheet('')
+        self._upload_page.setStyleSheet('background:#f0f4f8;')
+        self._proc_page.setStyleSheet('background:#f0f4f8;')
+        self._status.setStyleSheet('font-size:12px;')
+        self.sidebar.setStyleSheet(
+            'background:#ffffff;border:none;border-left:1px solid #e2e8f0;')
+        self._sidebar_wrap.setStyleSheet('')
+        for panel in (self.old_panel, self.new_panel):
+            panel.browser.setStyleSheet('background:#ffffff;border:none;')
 
     # ── Collapse / expand panels ──────────────────────────────────────────────
     def _toggle_sidebar(self):
