@@ -34,6 +34,8 @@ class _CompareWorker(QThread):
         # Results populated by run()
         self.old_doc:      Document | None = None
         self.new_doc:      Document | None = None
+        self.old_plain:    str = ''   # plain text for fast two-phase display
+        self.new_plain:    str = ''
         self.old_html:     str = ''
         self.new_html:     str = ''
         self.sidebar_html: str = ''
@@ -49,6 +51,10 @@ class _CompareWorker(QThread):
                 self.progress.emit('Old PDF extracted…', 40)
                 self.new_doc = new_fut.result()
 
+            # Build plain text here (worker thread) so the main thread only
+            # has to call setPlainText(), not generate the strings.
+            self.old_plain = self.old_doc.display_text()
+            self.new_plain = self.new_doc.display_text()
             self.progress.emit('PDFs loaded — rendering preview…', 55)
             self.extracted.emit()   # show plain text immediately before diff
 
@@ -1074,9 +1080,11 @@ class MainWindow(QMainWindow):
         for wdg in self._zoom_widgets:
             wdg.setVisible(False)
 
-        # Show plain (un-highlighted) text immediately
-        self.old_panel.set_html(w.old_doc.to_html())
-        self.new_panel.set_html(w.new_doc.to_html())
+        # setPlainText is ~100× faster than setHtml for large documents —
+        # no HTML parsing or rich-text layout, so the main thread is free
+        # in milliseconds.  The diff highlights replace this in _on_compare_done.
+        self.old_panel.set_plain(w.old_plain)
+        self.new_panel.set_plain(w.new_plain)
         self.sidebar.setHtml('')
 
         self._stack.setCurrentIndex(2)
