@@ -119,6 +119,13 @@ def extract_pdf(path: str) -> Document:
             for annot in page.annots()
             if annot.type[1] == "Underline"
         ]
+        # Hyperlink rects — spans that fall under a link annotation are NOT
+        # treated as underlined emphasis (they are styled by the browser/viewer,
+        # not by the author for semantic emphasis).
+        try:
+            link_rects = [fitz.Rect(lk['from']) for lk in page.get_links() if lk.get('from')]
+        except Exception:
+            link_rects = []
 
         # -------------------------------------------------------------
         # 2. Drawing-based detection (thin lines / rectangles)
@@ -241,7 +248,10 @@ def extract_pdf(path: str) -> Document:
                             any(span_rect.intersects(r) for r in strike_rects)
                             or draw_strike
                         )
-                        underline = (
+                        # Suppress underline on hyperlink spans — the underline
+                        # is rendered by the viewer, not authored as emphasis.
+                        is_link = any(span_rect.intersects(lr) for lr in link_rects)
+                        underline = (not is_link) and (
                             any(span_rect.intersects(r) for r in underline_rects)
                             or draw_underline
                         )

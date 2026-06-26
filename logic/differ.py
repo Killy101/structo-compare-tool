@@ -99,6 +99,52 @@ def _flatten(blocks: List[TextBlock]) -> List[str]:
     return words
 
 
+def _flatten_tokens(blocks: List[TextBlock]) -> List[_Token]:
+    """Return a _Token per word, parallel to :func:`_flatten` (blank blocks skipped)."""
+    tokens: List[_Token] = []
+    for block in blocks:
+        if block.is_blank():
+            continue
+        for word, span in _block_words(block):
+            tokens.append(_Token(
+                word=word,
+                bold=span.bold,
+                italic=span.italic,
+                src_strike=span.strikethrough,
+                underline=span.underline,
+            ))
+    return tokens
+
+
+def _render_toks(toks: List[_Token], limit: int = 120) -> str:
+    """Render tokens as HTML with their emphasis, truncated at *limit* chars."""
+    parts: List[str] = []
+    chars = 0
+    for tok in toks:
+        if chars > limit:
+            parts.append('…')
+            break
+        chars += len(tok.word) + 1
+        t = _html.escape(tok.word)
+        styles: List[str] = []
+        decos: List[str] = []
+        if tok.bold:
+            styles.append('font-weight:bold')
+        if tok.italic:
+            styles.append('font-style:italic')
+        if tok.underline:
+            decos.append('underline')
+        if tok.src_strike:
+            decos.append('line-through')
+        if decos:
+            styles.append('text-decoration:' + ' '.join(decos))
+        if styles:
+            parts.append(f'<span style="{";".join(styles)}">{t}</span>')
+        else:
+            parts.append(t)
+    return ' '.join(parts)
+
+
 # -----------------------------------------------------------------------
 # Render one panel, highlighting changed words and dropping nav anchors.
 # -----------------------------------------------------------------------
@@ -160,15 +206,14 @@ def _render_panel(blocks: List[TextBlock], changed: List[bool],
 # -----------------------------------------------------------------------
 # Sidebar helpers
 # -----------------------------------------------------------------------
-def _truncate(text: str, limit: int = 120) -> str:
-    return (text[:limit] + "…") if len(text) > limit else text
-
-
-def _sidebar_item(kind: str, label: str, old_txt: str, new_txt: str, cid: str) -> str:
+def _sidebar_item(kind: str, label: str,
+                  old_toks: List[_Token], new_toks: List[_Token], cid: str) -> str:
     """Render a single entry for the changes‑sidebar.
 
-    ``kind`` is one of ``del`` / ``add`` / ``mod`` and drives the colour and
-    the anchor fragment used for navigation.
+    ``kind`` is one of ``del`` / ``add`` / ``mod``.  Tokens carry their source
+    emphasis (bold/italic/underline/strike) so the sidebar reflects the actual
+    formatting of the changed text.  Emphasis-indicator chips are shown next to
+    the badge when the relevant tokens carry formatting.
     """
     badge_map = {
         "del": ("bdel", "Deleted"),
@@ -176,30 +221,46 @@ def _sidebar_item(kind: str, label: str, old_txt: str, new_txt: str, cid: str) -
         "mod": ("bmod", "Modified"),
     }
     bclass, blabel = badge_map.get(kind, ("bmod", label))
-    oe = _html.escape(_truncate(old_txt))
-    ne = _html.escape(_truncate(new_txt))
 
-    if old_txt and new_txt:
+    # For "del", the emphasis of the removed text matters; for "add"/"mod",
+    # the emphasis of the incoming (new) text is what the user needs to see.
+    emph_src = old_toks if kind == "del" else new_toks
+    chip = ('font-size:9px;padding:0 4px;border-radius:2px;'
+            'background:#ddd6fe;color:#4c1d95;margin-left:3px;vertical-align:middle')
+    emph_chips = ''
+    if any(t.bold for t in emph_src):
+        emph_chips += f'<span style="{chip};font-weight:bold">B</span>'
+    if any(t.italic for t in emph_src):
+        emph_chips += f'<span style="{chip};font-style:italic">I</span>'
+    if any(t.underline for t in emph_src):
+        emph_chips += f'<span style="{chip};text-decoration:underline">U</span>'
+    if any(t.src_strike for t in emph_src):
+        emph_chips += f'<span style="{chip};text-decoration:line-through">S</span>'
+
+    old_rendered = _render_toks(old_toks)
+    new_rendered = _render_toks(new_toks)
+
+    if old_toks and new_toks:
         detail = (
             f'<div style="margin-top:3px;font-size:11px">'
-            f'<span style="text-decoration:line-through;color:#ef4444">{oe}</span>'
+            f'<span style="text-decoration:line-through;color:#ef4444">{old_rendered}</span>'
             f' <span style="color:#6366f1">→</span> '
-            f'<span style="color:#16a34a">{ne}</span>'
-            f"</div>"
+            f'<span style="color:#16a34a">{new_rendered}</span>'
+            f'</div>'
         )
-    elif old_txt:
-        detail = f'<div style="margin-top:3px;font-size:11px;text-decoration:line-through;color:#ef4444">{oe}</div>'
+    elif old_toks:
+        detail = f'<div style="margin-top:3px;font-size:11px;color:#ef4444">{old_rendered}</div>'
     else:
-        detail = f'<div style="margin-top:3px;font-size:11px;color:#16a34a">{ne}</div>'
+        detail = f'<div style="margin-top:3px;font-size:11px;color:#16a34a">{new_rendered}</div>'
 
     href = f"#{kind}:{cid}"
     return (
         f'<div class="ch {kind}">'
         f'<a href="{href}" style="text-decoration:none;color:inherit;display:block">'
-        f'<span class="badge {bclass}">{blabel}</span>'
-        f"{detail}"
-        f"</a>"
-        f"</div>"
+        f'<span class="badge {bclass}">{blabel}</span>{emph_chips}'
+        f'{detail}'
+        f'</a>'
+        f'</div>'
     )
 
 
@@ -256,8 +317,11 @@ def build_diff_html(old_doc: Document, new_doc: Document) -> Tuple[str, str, str
     new_spans = _compute_block_word_spans(new_blocks)
 
     # Flat word lists — needed for the word-level sub-diffs.
-    old_words = _flatten(old_blocks)
-    new_words = _flatten(new_blocks)
+    old_words  = _flatten(old_blocks)
+    new_words  = _flatten(new_blocks)
+    # Parallel token lists carry per-word emphasis for sidebar rendering.
+    old_tokens = _flatten_tokens(old_blocks)
+    new_tokens = _flatten_tokens(new_blocks)
 
     old_changed = [False] * len(old_words)
     new_changed = [False] * len(new_words)
@@ -290,8 +354,10 @@ def build_diff_html(old_doc: Document, new_doc: Document) -> Tuple[str, str, str
         else:
             nw_lo = nw_hi = new_spans[ni1][0] if ni1 < len(new_spans) else len(new_words)
 
-        sub_old = old_words[ow_lo:ow_hi]
-        sub_new = new_words[nw_lo:nw_hi]
+        sub_old      = old_words[ow_lo:ow_hi]
+        sub_new      = new_words[nw_lo:nw_hi]
+        sub_old_toks = old_tokens[ow_lo:ow_hi]
+        sub_new_toks = new_tokens[nw_lo:nw_hi]
 
         # Level-2: word-level diff within the changed block range
         use_autojunk = len(sub_old) > 5_000 or len(sub_new) > 5_000
@@ -319,18 +385,21 @@ def build_diff_html(old_doc: Document, new_doc: Document) -> Tuple[str, str, str
                 kind = "add"
                 stats["added"] += 1
                 new_anchors[abs_j1] = cid
-                sidebar_items.append(_sidebar_item("add", "Added", "", new_txt, cid))
+                sidebar_items.append(_sidebar_item(
+                    "add", "Added", [], sub_new_toks[wj1:wj2], cid))
             elif wtag == "delete":
                 kind = "del"
                 stats["deleted"] += 1
                 old_anchors[abs_i1] = cid
-                sidebar_items.append(_sidebar_item("del", "Deleted", old_txt, "", cid))
+                sidebar_items.append(_sidebar_item(
+                    "del", "Deleted", sub_old_toks[wi1:wi2], [], cid))
             else:  # replace → modification (paired delete + insert)
                 kind = "mod"
                 stats["modified"] += 1
                 old_anchors[abs_i1] = cid
                 new_anchors[abs_j1] = cid
-                sidebar_items.append(_sidebar_item("mod", "Modified", old_txt, new_txt, cid))
+                sidebar_items.append(_sidebar_item(
+                    "mod", "Modified", sub_old_toks[wi1:wi2], sub_new_toks[wj1:wj2], cid))
 
             changes.append({"id": cid, "kind": kind, "old": old_txt, "new": new_txt})
 
