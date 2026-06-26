@@ -382,6 +382,8 @@ class _UploadPage(QWidget):
             n /= 1024
         return f'{n:.1f} TB'
 
+    _PAGE_LIMIT = 3_000   # hard cap — beyond this the diff becomes impractical
+
     @staticmethod
     def _validate(kind: str, path: str) -> tuple:
         """Return (ok, message)."""
@@ -395,7 +397,22 @@ class _UploadPage(QWidget):
                         return False, '✕ Invalid PDF header'
             except OSError as e:
                 return False, f'✕ {e}'
-            return True, '✓ Valid PDF'
+            # Count pages — reject if over the limit.
+            try:
+                import fitz
+                pdf = fitz.open(path)
+                n_pages = len(pdf)
+                pdf.close()
+            except Exception:
+                n_pages = 0   # can't count; let the extractor surface the error
+
+            if n_pages > _UploadPage._PAGE_LIMIT:
+                return (
+                    False,
+                    f'✕ PDF has {n_pages:,} pages — limit is {_UploadPage._PAGE_LIMIT:,} pages',
+                )
+            page_info = f'  ·  {n_pages:,} pages' if n_pages else ''
+            return True, f'✓ Valid PDF{page_info}'
         else:
             if ext not in ('.xml', '.xhtml', '.html', '.htm'):
                 return False, '✕ Not an XML/HTML file'
