@@ -217,7 +217,7 @@ class _UploadPage(QWidget):
         header.setFixedHeight(104)
         header.setStyleSheet(
             'background:qlineargradient(x1:0,y1:0,x2:1,y2:0,'
-            'stop:0 #6366f1,stop:0.45 #7c3aed,stop:1 #0ea5e9);'
+            'stop:0 #7f1d1d,stop:0.45 #991b1b,stop:1 #450a0a);'
             'border-radius:20px 20px 0 0;'
         )
         hl = QVBoxLayout(header)
@@ -327,15 +327,15 @@ class _UploadPage(QWidget):
         bwl.setContentsMargins(32, 20, 32, 0)
         bwl.setSpacing(10)
 
-        self.btn_compare = _btn('⟳  Compare', '#0ea5e9', '#0284c7', min_w=200)
+        self.btn_compare = _btn('⟳  Compare', '#991b1b', '#7f1d1d', min_w=200)
         self.btn_compare.setFixedHeight(44)
         self.btn_compare.setEnabled(False)
         self.btn_compare.setStyleSheet(
-            'QPushButton{background:#0ea5e9;color:#fff;border:none;'
+            'QPushButton{background:#991b1b;color:#fff;border:none;'
             'padding:8px 24px;border-radius:8px;font-weight:700;font-size:14px;'
             'letter-spacing:0.5px;}'
-            'QPushButton:hover{background:#0284c7;}'
-            'QPushButton:disabled{background:#e2e8f0;color:#94a3b8;}'
+            'QPushButton:hover{background:#7f1d1d;}'
+            'QPushButton:disabled{background:#3f3f46;color:#71717a;}'
         )
 
         cmp_wrap = QHBoxLayout()
@@ -526,7 +526,20 @@ class _UploadPage(QWidget):
         else:
             self._hint.setText('Select Old PDF and New PDF to enable comparison.')
 
-    # ── Custom gradient background ──────────────────────────────────────────
+    # ── Custom background (image or fallback gradient) ──────────────────────
+    _bg_pixmap = None   # class-level cache so QPixmap is loaded once
+
+    @classmethod
+    def _load_bg(cls):
+        if cls._bg_pixmap is None:
+            import os
+            from PySide6.QtGui import QPixmap
+            img = os.path.join(os.path.dirname(__file__), '..', 'assets', 'background.jpg')
+            img = os.path.normpath(img)
+            px = QPixmap(img)
+            cls._bg_pixmap = px if not px.isNull() else False  # False = not found
+        return cls._bg_pixmap
+
     def paintEvent(self, event):
         from PySide6.QtGui import QPainter, QLinearGradient, QRadialGradient
         from PySide6.QtCore import QPointF
@@ -535,46 +548,59 @@ class _UploadPage(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
 
-        # Dark background: slate → indigo → deep ocean
+        px = self._load_bg()
+        if px:
+            # Scale-to-fill: cover the full panel, centred
+            scaled = px.scaled(
+                w, h,
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            ox = (w - scaled.width())  // 2
+            oy = (h - scaled.height()) // 2
+            p.drawPixmap(ox, oy, scaled)
+            # Subtle dark vignette so the card reads clearly
+            vgn = QRadialGradient(QPointF(w / 2, h / 2), max(w, h) * 0.75)
+            vgn.setColorAt(0.0, QColor(0, 0, 0, 0))
+            vgn.setColorAt(1.0, QColor(0, 0, 0, 140))
+            p.fillRect(self.rect(), vgn)
+            p.end()
+            return
+
+        # ── Fallback: dark crimson / black gradient (matches image aesthetic) ──
         bg = QLinearGradient(0, 0, w, h)
-        bg.setColorAt(0.00, QColor('#0f172a'))   # slate-900
-        bg.setColorAt(0.50, QColor('#1e1b4b'))   # indigo-950
-        bg.setColorAt(1.00, QColor('#082f49'))   # sky-950
+        bg.setColorAt(0.00, QColor('#0a0000'))   # near-black
+        bg.setColorAt(0.40, QColor('#1a0000'))   # very dark red
+        bg.setColorAt(0.75, QColor('#2d0000'))   # dark crimson
+        bg.setColorAt(1.00, QColor('#0a0000'))   # back to black
         p.fillRect(self.rect(), bg)
 
         p.setPen(Qt.PenStyle.NoPen)
         R = max(w, h)
 
-        # Top-left indigo glow
-        r1 = QRadialGradient(QPointF(0, 0), R * 0.55)
-        r1.setColorAt(0.0, QColor(99, 102, 241, 90))
-        r1.setColorAt(1.0, QColor(99, 102, 241, 0))
+        # Large top-left blood-red glow
+        r1 = QRadialGradient(QPointF(w * 0.05, h * 0.1), R * 0.65)
+        r1.setColorAt(0.0, QColor(180, 10, 10, 110))
+        r1.setColorAt(1.0, QColor(180, 10, 10, 0))
         p.setBrush(r1)
-        p.drawEllipse(QPointF(0, 0), R * 0.55, R * 0.55)
+        p.drawEllipse(QPointF(w * 0.05, h * 0.1), R * 0.65, R * 0.65)
 
-        # Bottom-right sky glow
-        r2 = QRadialGradient(QPointF(w, h), R * 0.48)
-        r2.setColorAt(0.0, QColor(14, 165, 233, 75))
-        r2.setColorAt(1.0, QColor(14, 165, 233, 0))
+        # Bottom-centre crimson ember
+        r2 = QRadialGradient(QPointF(w * 0.5, h * 0.95), R * 0.45)
+        r2.setColorAt(0.0, QColor(200, 20, 0, 90))
+        r2.setColorAt(1.0, QColor(200, 20, 0, 0))
         p.setBrush(r2)
-        p.drawEllipse(QPointF(w, h), R * 0.48, R * 0.48)
+        p.drawEllipse(QPointF(w * 0.5, h * 0.95), R * 0.45, R * 0.45)
 
-        # Top-right violet accent
-        r3 = QRadialGradient(QPointF(w * 0.88, h * 0.18), R * 0.28)
-        r3.setColorAt(0.0, QColor(167, 139, 250, 55))
-        r3.setColorAt(1.0, QColor(167, 139, 250, 0))
+        # Right-side deep scarlet accent
+        r3 = QRadialGradient(QPointF(w * 0.92, h * 0.45), R * 0.3)
+        r3.setColorAt(0.0, QColor(160, 0, 0, 70))
+        r3.setColorAt(1.0, QColor(160, 0, 0, 0))
         p.setBrush(r3)
-        p.drawEllipse(QPointF(w * 0.88, h * 0.18), R * 0.28, R * 0.28)
-
-        # Bottom-left emerald accent
-        r4 = QRadialGradient(QPointF(w * 0.12, h * 0.84), R * 0.22)
-        r4.setColorAt(0.0, QColor(52, 211, 153, 45))
-        r4.setColorAt(1.0, QColor(52, 211, 153, 0))
-        p.setBrush(r4)
-        p.drawEllipse(QPointF(w * 0.12, h * 0.84), R * 0.22, R * 0.22)
+        p.drawEllipse(QPointF(w * 0.92, h * 0.45), R * 0.3, R * 0.3)
 
         # Subtle dot grid
-        p.setPen(QColor(255, 255, 255, 14))
+        p.setPen(QColor(255, 60, 60, 16))
         gap = 28
         for xi in range(0, w + gap, gap):
             for yi in range(0, h + gap, gap):
@@ -646,24 +672,44 @@ class _ProcessingPage(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         w, h = self.width(), self.height()
+
+        # Reuse the same background as the upload page (image or fallback)
+        px = _UploadPage._load_bg()
+        if px:
+            scaled = px.scaled(
+                w, h,
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            ox = (w - scaled.width())  // 2
+            oy = (h - scaled.height()) // 2
+            p.drawPixmap(ox, oy, scaled)
+            vgn = QRadialGradient(QPointF(w / 2, h / 2), max(w, h) * 0.75)
+            vgn.setColorAt(0.0, QColor(0, 0, 0, 0))
+            vgn.setColorAt(1.0, QColor(0, 0, 0, 140))
+            p.fillRect(self.rect(), vgn)
+            p.end()
+            return
+
         bg = QLinearGradient(0, 0, w, h)
-        bg.setColorAt(0.00, QColor('#0f172a'))
-        bg.setColorAt(0.50, QColor('#1e1b4b'))
-        bg.setColorAt(1.00, QColor('#082f49'))
+        bg.setColorAt(0.00, QColor('#0a0000'))
+        bg.setColorAt(0.40, QColor('#1a0000'))
+        bg.setColorAt(0.75, QColor('#2d0000'))
+        bg.setColorAt(1.00, QColor('#0a0000'))
         p.fillRect(self.rect(), bg)
         p.setPen(Qt.PenStyle.NoPen)
         R = max(w, h)
-        r1 = QRadialGradient(QPointF(0, 0), R * 0.55)
-        r1.setColorAt(0.0, QColor(99, 102, 241, 90))
-        r1.setColorAt(1.0, QColor(99, 102, 241, 0))
+        r1 = QRadialGradient(QPointF(w * 0.05, h * 0.1), R * 0.65)
+        r1.setColorAt(0.0, QColor(180, 10, 10, 110))
+        r1.setColorAt(1.0, QColor(180, 10, 10, 0))
         p.setBrush(r1)
-        p.drawEllipse(QPointF(0, 0), R * 0.55, R * 0.55)
-        r2 = QRadialGradient(QPointF(w, h), R * 0.48)
-        r2.setColorAt(0.0, QColor(14, 165, 233, 75))
-        r2.setColorAt(1.0, QColor(14, 165, 233, 0))
+        p.drawEllipse(QPointF(w * 0.05, h * 0.1), R * 0.65, R * 0.65)
+        r2 = QRadialGradient(QPointF(w * 0.5, h), R * 0.45)
+        r2.setColorAt(0.0, QColor(200, 20, 0, 90))
+        r2.setColorAt(1.0, QColor(200, 20, 0, 0))
         p.setBrush(r2)
-        p.drawEllipse(QPointF(w, h), R * 0.48, R * 0.48)
-        p.setPen(QColor(255, 255, 255, 14))
+        p.drawEllipse(QPointF(w * 0.5, h), R * 0.45, R * 0.45)
+        p.setPen(QColor(255, 60, 60, 16))
         gap = 28
         for xi in range(0, w + gap, gap):
             for yi in range(0, h + gap, gap):
