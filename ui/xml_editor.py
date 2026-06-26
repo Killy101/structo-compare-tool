@@ -151,7 +151,7 @@ def _render_xml_preview(xml_text: str) -> str:
             return f'<em>{inner}</em>{tail}'
         if local == 'u':
             return f'<u>{inner}</u>{tail}'
-        if local in ('s', 'del', 'strike', 'strikethrough'):
+        if local in ('s', 'del', 'strike', 'strikethrough', 'i-str'):
             return f'<s>{inner}</s>{tail}'
         if local == 'sup':
             return f'<sup>{inner}</sup>{tail}'
