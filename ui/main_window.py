@@ -1,3 +1,4 @@
+import concurrent.futures
 import os
 import traceback
 
@@ -39,11 +40,13 @@ class _CompareWorker(QThread):
 
     def run(self):
         try:
-            self.progress.emit('Extracting Old PDF…', 10)
-            self.old_doc = extract_pdf(self.old_path)
-
-            self.progress.emit('Extracting New PDF…', 40)
-            self.new_doc = extract_pdf(self.new_path)
+            self.progress.emit('Extracting PDFs (parallel)…', 10)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                old_fut = pool.submit(extract_pdf, self.old_path)
+                new_fut = pool.submit(extract_pdf, self.new_path)
+                self.old_doc = old_fut.result()
+                self.progress.emit('Old PDF extracted…', 45)
+                self.new_doc = new_fut.result()
 
             self.progress.emit('Comparing documents…', 75)
             self.old_html, self.new_html, self.sidebar_html, self.changes = \

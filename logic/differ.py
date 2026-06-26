@@ -204,26 +204,60 @@ def _sidebar_item(kind: str, label: str, old_txt: str, new_txt: str, cid: str) -
 
 
 # -----------------------------------------------------------------------
+# Two-level diff helpers
+# -----------------------------------------------------------------------
+def _block_text(block: TextBlock) -> str:
+    """Canonical text of a block for coarse block-level hashing."""
+    if block.is_blank():
+        return ''
+    return ' '.join(w for w, _ in _block_words(block))
+
+
+def _compute_block_word_spans(blocks: List[TextBlock]) -> List[Tuple[int, int]]:
+    """Return (word_start, word_end) for each block.
+
+    Blank blocks contribute zero words; their span is (pos, pos).
+    Indices are aligned with the flat list produced by :func:`_flatten`.
+    """
+    spans: List[Tuple[int, int]] = []
+    pos = 0
+    for block in blocks:
+        if block.is_blank():
+            spans.append((pos, pos))
+        else:
+            count = sum(1 for _ in _block_words(block))
+            spans.append((pos, pos + count))
+            pos += count
+    return spans
+
+
+# -----------------------------------------------------------------------
 # Main diff entry point
 # -----------------------------------------------------------------------
 def build_diff_html(old_doc: Document, new_doc: Document) -> Tuple[str, str, str, list]:
     """
-    Flat word‑stream diff.
+    Two-level word-stream diff.
+
+    1. A **block-level** SequenceMatcher identifies equal vs. changed paragraph
+       ranges in O(n_blocks²) — fast even for 300-page legal documents.
+    2. A **word-level** SequenceMatcher then runs *only* on the changed paragraph
+       ranges, so the expensive O(n_words²) cost is proportional to the size of
+       the *differences* rather than the whole document.
 
     Returns ``(old_html, new_html, sidebar_html, changes)`` where ``changes``
     is an ordered list of ``{"id", "kind", "old", "new"}`` dicts used for
-    change‑to‑change navigation.
+    change-to-change navigation.
     """
     old_blocks = old_doc.blocks
     new_blocks = new_doc.blocks
 
+    # Pre-compute word-position spans for every block (needed for index mapping).
+    old_spans = _compute_block_word_spans(old_blocks)
+    new_spans = _compute_block_word_spans(new_blocks)
+
+    # Flat word lists — needed for the word-level sub-diffs.
     old_words = _flatten(old_blocks)
     new_words = _flatten(new_blocks)
-
-    # Enable autojunk only for very large documents (>5 000 words on either side)
-    # to keep O(n²) SequenceMatcher manageable while preserving accuracy on small docs.
-    use_autojunk = len(old_words) > 5_000 or len(new_words) > 5_000
-    matcher = difflib.SequenceMatcher(None, old_words, new_words, autojunk=use_autojunk)
 
     old_changed = [False] * len(old_words)
     new_changed = [False] * len(new_words)
@@ -235,38 +269,70 @@ def build_diff_html(old_doc: Document, new_doc: Document) -> Tuple[str, str, str
     stats = {"added": 0, "deleted": 0, "modified": 0}
     cnum = 0
 
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
+    # Level-1: block-level diff (autojunk off — blocks are long; false junk is bad)
+    old_hashes = [_block_text(b) for b in old_blocks]
+    new_hashes = [_block_text(b) for b in new_blocks]
+    block_matcher = difflib.SequenceMatcher(None, old_hashes, new_hashes, autojunk=False)
+
+    for btag, oi1, oi2, ni1, ni2 in block_matcher.get_opcodes():
+        if btag == "equal":
             continue
 
-        cnum += 1
-        cid = f"c{cnum}"
-        for k in range(i1, i2):
-            old_changed[k] = True
-        for k in range(j1, j2):
-            new_changed[k] = True
+        # Word range covered by the changed old blocks
+        if oi1 < oi2:
+            ow_lo, ow_hi = old_spans[oi1][0], old_spans[oi2 - 1][1]
+        else:
+            ow_lo = ow_hi = old_spans[oi1][0] if oi1 < len(old_spans) else len(old_words)
 
-        old_txt = " ".join(old_words[i1:i2])
-        new_txt = " ".join(new_words[j1:j2])
+        # Word range covered by the changed new blocks
+        if ni1 < ni2:
+            nw_lo, nw_hi = new_spans[ni1][0], new_spans[ni2 - 1][1]
+        else:
+            nw_lo = nw_hi = new_spans[ni1][0] if ni1 < len(new_spans) else len(new_words)
 
-        if tag == "insert":
-            kind = "add"
-            stats["added"] += 1
-            new_anchors[j1] = cid
-            sidebar_items.append(_sidebar_item("add", "Added", "", new_txt, cid))
-        elif tag == "delete":
-            kind = "del"
-            stats["deleted"] += 1
-            old_anchors[i1] = cid
-            sidebar_items.append(_sidebar_item("del", "Deleted", old_txt, "", cid))
-        else:  # replace -> modification (paired delete + insert)
-            kind = "mod"
-            stats["modified"] += 1
-            old_anchors[i1] = cid
-            new_anchors[j1] = cid
-            sidebar_items.append(_sidebar_item("mod", "Modified", old_txt, new_txt, cid))
+        sub_old = old_words[ow_lo:ow_hi]
+        sub_new = new_words[nw_lo:nw_hi]
 
-        changes.append({"id": cid, "kind": kind, "old": old_txt, "new": new_txt})
+        # Level-2: word-level diff within the changed block range
+        use_autojunk = len(sub_old) > 5_000 or len(sub_new) > 5_000
+        word_matcher = difflib.SequenceMatcher(None, sub_old, sub_new, autojunk=use_autojunk)
+
+        for wtag, wi1, wi2, wj1, wj2 in word_matcher.get_opcodes():
+            if wtag == "equal":
+                continue
+
+            cnum += 1
+            cid = f"c{cnum}"
+
+            abs_i1, abs_i2 = ow_lo + wi1, ow_lo + wi2
+            abs_j1, abs_j2 = nw_lo + wj1, nw_lo + wj2
+
+            for k in range(abs_i1, abs_i2):
+                old_changed[k] = True
+            for k in range(abs_j1, abs_j2):
+                new_changed[k] = True
+
+            old_txt = " ".join(sub_old[wi1:wi2])
+            new_txt = " ".join(sub_new[wj1:wj2])
+
+            if wtag == "insert":
+                kind = "add"
+                stats["added"] += 1
+                new_anchors[abs_j1] = cid
+                sidebar_items.append(_sidebar_item("add", "Added", "", new_txt, cid))
+            elif wtag == "delete":
+                kind = "del"
+                stats["deleted"] += 1
+                old_anchors[abs_i1] = cid
+                sidebar_items.append(_sidebar_item("del", "Deleted", old_txt, "", cid))
+            else:  # replace → modification (paired delete + insert)
+                kind = "mod"
+                stats["modified"] += 1
+                old_anchors[abs_i1] = cid
+                new_anchors[abs_j1] = cid
+                sidebar_items.append(_sidebar_item("mod", "Modified", old_txt, new_txt, cid))
+
+            changes.append({"id": cid, "kind": kind, "old": old_txt, "new": new_txt})
 
     old_html = _render_panel(old_blocks, old_changed, old_anchors, "del")
     new_html = _render_panel(new_blocks, new_changed, new_anchors, "add")
