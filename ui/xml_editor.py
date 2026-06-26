@@ -1,10 +1,11 @@
 # ui/xml_editor.py
+import html as _html_mod
 import re as _re
 from lxml import etree  # type: ignore[attr-defined]  # C-extension, no stubs
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QPlainTextEdit, QTextEdit,
+    QPlainTextEdit, QTextEdit, QTextBrowser, QSplitter,
     QPushButton, QLabel, QLineEdit, QCheckBox,
     QMessageBox, QInputDialog, QScrollArea, QDialog, QToolTip,
 )
@@ -13,6 +14,206 @@ from PySide6.QtGui import (
     QKeySequence, QShortcut, QTextCursor, QTextDocument, QPainter,
 )
 from PySide6.QtCore import QRegularExpression, Qt, QSize, QRect, QTimer, QEvent
+
+
+# -----------------------------------------------------------------------
+# Live preview renderer
+# -----------------------------------------------------------------------
+_PREVIEW_CSS = """
+<style>
+  body {
+    font-family: Arial, sans-serif;
+    font-size: 13px;
+    line-height: 1.7;
+    color: #1e293b;
+    background: #ffffff;
+    padding: 16px 20px;
+    margin: 0;
+  }
+  h1 { font-size: 18px; font-weight: bold; margin: 10px 0 4px; color: #0f172a; }
+  h2 { font-size: 15px; font-weight: bold; margin: 8px 0 3px; color: #1e293b; }
+  h3 { font-size: 13px; font-weight: bold; margin: 6px 0 2px; }
+  p  { margin: 4px 0; }
+  blockquote {
+    margin: 4px 0 4px 14px;
+    padding-left: 10px;
+    border-left: 3px solid #cbd5e1;
+    color: #475569;
+    font-style: italic;
+  }
+  table { border-collapse: collapse; margin: 6px 0; }
+  td, th { border: 1px solid #e2e8f0; padding: 3px 8px; }
+  .innodrep {
+    background: #fef3c7;
+    border: 1px solid #f59e0b;
+    border-radius: 3px;
+    padding: 1px 4px;
+  }
+  .innodrep-badge {
+    font-size: 9px;
+    background: #d97706;
+    color: #fff;
+    border-radius: 2px;
+    padding: 0 3px;
+    margin-left: 3px;
+    vertical-align: middle;
+  }
+  .tag-badge {
+    font-size: 9px;
+    color: #94a3b8;
+    font-family: monospace;
+    vertical-align: super;
+  }
+  .fn-badge { color: #6366f1; font-size: 10px; }
+  .meta-badge {
+    background: #f1f5f9;
+    color: #64748b;
+    font-size: 10px;
+    border-radius: 3px;
+    padding: 0 4px;
+    font-style: italic;
+  }
+  .xml-error {
+    background: #fef2f2;
+    border: 1px solid #fca5a5;
+    border-radius: 6px;
+    padding: 12px 16px;
+    color: #dc2626;
+    font-family: monospace;
+    font-size: 12px;
+  }
+  .preview-empty {
+    color: #94a3b8;
+    font-style: italic;
+    text-align: center;
+    margin-top: 40px;
+  }
+</style>
+"""
+
+_TRANSPARENT_TAGS = frozenset({
+    'body', 'root', 'document', 'doc', 'content', 'text', 'xml',
+    'innodxml', 'innoddoc', 'article', 'section',
+})
+
+
+def _render_xml_preview(xml_text: str) -> str:
+    """Convert XML source to styled HTML for the live preview pane.
+
+    Handles Structo-specific tags (innodReplace), common inline/block
+    formatting tags, and shows unknown custom tags with a subtle badge
+    rather than hiding them — so the analyst can see what they inserted.
+    """
+    text = xml_text.strip()
+    if not text:
+        return (_PREVIEW_CSS +
+                '<body><p class="preview-empty">Start typing XML to see a live preview.</p></body>')
+
+    try:
+        root = etree.fromstring(text.encode('utf-8'))
+    except etree.XMLSyntaxError as e:
+        short = str(e).split('\n')[0][:300]
+        return (_PREVIEW_CSS +
+                f'<body><div class="xml-error">'
+                f'<b>XML syntax error</b><br>{_html_mod.escape(short)}'
+                f'</div></body>')
+
+    def _node(el) -> str:
+        # Skip comments, PIs, etc. — just take their tail text
+        if not isinstance(el.tag, str):
+            return _html_mod.escape(el.tail or '')
+
+        local = el.tag.split('}')[-1].lower()
+        inner = _html_mod.escape(el.text or '') + ''.join(_node(c) for c in el)
+        tail  = _html_mod.escape(el.tail or '')
+
+        # ── Inline emphasis ───────────────────────────────────────────────
+        if local in ('b', 'strong', 'bold'):
+            return f'<b>{inner}</b>{tail}'
+        if local in ('i', 'em', 'italic'):
+            return f'<em>{inner}</em>{tail}'
+        if local == 'u':
+            return f'<u>{inner}</u>{tail}'
+        if local in ('s', 'del', 'strike', 'strikethrough'):
+            return f'<s>{inner}</s>{tail}'
+        if local == 'sup':
+            return f'<sup>{inner}</sup>{tail}'
+        if local == 'sub':
+            return f'<sub>{inner}</sub>{tail}'
+        if local in ('span', 'a', 'abbr', 'acronym', 'cite', 'code', 'kbd',
+                     'samp', 'tt', 'var'):
+            return f'{inner}{tail}'
+
+        # ── Structo-specific: innodReplace ────────────────────────────────
+        if local == 'innodreplace':
+            user_edit = el.get('userEdit') or el.get('useredit') or ''
+            badge = ('<span class="innodrep-badge">edit</span>'
+                     if user_edit else '')
+            return f'<span class="innodrep">{inner}{badge}</span>{tail}'
+
+        # ── Block elements ────────────────────────────────────────────────
+        if local in ('p', 'para', 'paragraph'):
+            return f'<p>{inner}</p>{tail}'
+        if local in ('h', 'heading', 'title'):
+            return f'<h1>{inner}</h1>{tail}'
+        if local == 'h1':
+            return f'<h1>{inner}</h1>{tail}'
+        if local == 'h2':
+            return f'<h2>{inner}</h2>{tail}'
+        if local in ('h3', 'h4', 'h5', 'h6'):
+            return f'<h3>{inner}</h3>{tail}'
+        if local in ('li', 'item'):
+            return f'<p style="padding-left:20px">• {inner}</p>{tail}'
+        if local in ('ol', 'ul'):
+            return f'<div style="padding-left:4px">{inner}</div>{tail}'
+        if local == 'blockquote':
+            return f'<blockquote>{inner}</blockquote>{tail}'
+        if local in ('br', 'lb'):
+            return f'<br>{tail}'
+        if local in ('hr', 'rule'):
+            return f'<hr style="border:none;border-top:1px solid #e2e8f0;margin:6px 0">{tail}'
+        if local in ('pre', 'code'):
+            return (f'<pre style="background:#f8fafc;padding:6px 10px;'
+                    f'border-radius:4px;font-size:11px;overflow-x:auto">'
+                    f'{inner}</pre>{tail}')
+
+        # ── Footnote ──────────────────────────────────────────────────────
+        if local in ('fn', 'footnote', 'note'):
+            fn_text = _html_mod.escape(el.text or '').strip()
+            tip = f' title="{fn_text}"' if fn_text else ''
+            return f'<sup><span class="fn-badge"{tip}>[fn]</span></sup>{tail}'
+
+        # ── Table ─────────────────────────────────────────────────────────
+        if local == 'table':
+            return f'<table>{inner}</table>{tail}'
+        if local in ('thead', 'tbody', 'tfoot'):
+            return f'{inner}{tail}'
+        if local == 'tr':
+            return f'<tr>{inner}</tr>{tail}'
+        if local == 'th':
+            return f'<th>{inner}</th>{tail}'
+        if local == 'td':
+            return f'<td>{inner}</td>{tail}'
+
+        # ── Meta / structural with no display ─────────────────────────────
+        if local == 'meta':
+            label = el.get('name') or el.get('type') or local
+            return (f'<span class="meta-badge">'
+                    f'[{_html_mod.escape(label)}]</span>{tail}')
+
+        # ── Transparent wrappers (pass through) ───────────────────────────
+        if local in _TRANSPARENT_TAGS:
+            return inner + tail
+
+        # ── Unknown / custom tag: pass content, add subtle badge ──────────
+        badge = (f'<span class="tag-badge">&lt;{_html_mod.escape(local)}&gt;</span>'
+                 if inner.strip() else '')
+        return f'{badge}{inner}{tail}'
+
+    body_html = _node(root)
+    if not body_html.strip():
+        body_html = '<p class="preview-empty">Empty document.</p>'
+    return f'{_PREVIEW_CSS}<body>{body_html}</body>'
 
 
 # -----------------------------------------------------------------------
@@ -468,35 +669,45 @@ class XmlEditor(QWidget):
         tb.setContentsMargins(6, 3, 6, 3)
         tb.setSpacing(4)
 
-        def _tbtn(label: str, tip: str) -> QPushButton:
+        _TBTN_SS = (
+            'QPushButton{background:#f1f5f9;color:#475569;border:1px solid #e2e8f0;'
+            'padding:3px 10px;border-radius:3px;font-size:11px;}'
+            'QPushButton:hover{background:#e2e8f0;color:#334155;}'
+            'QPushButton:checked{background:#ede9fe;color:#5b21b6;border-color:#c4b5fd;}'
+        )
+
+        def _tbtn(label: str, tip: str, checkable: bool = False) -> QPushButton:
             b = QPushButton(label)
             b.setToolTip(tip)
-            b.setStyleSheet(
-                'QPushButton{background:#f1f5f9;color:#475569;border:1px solid #e2e8f0;'
-                'padding:3px 10px;border-radius:3px;font-size:11px;}'
-                'QPushButton:hover{background:#e2e8f0;color:#334155;}'
-            )
+            b.setCheckable(checkable)
+            b.setStyleSheet(_TBTN_SS)
             return b
 
-        self._btn_fmt   = _tbtn('Format XML',  'Pretty‑print (Ctrl+Shift+F)')
-        self._btn_find  = _tbtn('Find',         'Find (Ctrl+F)')
-        self._btn_repl  = _tbtn('Replace',      'Find & Replace (Ctrl+H)')
-        self._btn_goto  = _tbtn('Go to Line',   'Ctrl+G')
-        self._btn_cmt   = _tbtn('Comment',      'Toggle comment (Ctrl+/)')
-        self._btn_undo  = _tbtn('↩ Undo',       'Ctrl+Z')
-        self._btn_redo  = _tbtn('↪ Redo',       'Ctrl+Y')
-        self._btn_help  = _tbtn('⌨ Shortcuts',  'F1')
+        self._btn_fmt     = _tbtn('Format XML',   'Pretty-print (Ctrl+Shift+F)')
+        self._btn_find    = _tbtn('Find',           'Find (Ctrl+F)')
+        self._btn_repl    = _tbtn('Replace',        'Find & Replace (Ctrl+H)')
+        self._btn_goto    = _tbtn('Go to Line',     'Ctrl+G')
+        self._btn_cmt     = _tbtn('Comment',        'Toggle comment (Ctrl+/)')
+        self._btn_undo    = _tbtn('↩ Undo',   'Ctrl+Z')
+        self._btn_redo    = _tbtn('↪ Redo',   'Ctrl+Y')
+        self._btn_preview = _tbtn('□ Preview', 'Toggle live preview (Ctrl+P)',
+                                  checkable=True)
+        self._btn_help    = _tbtn('⌨ Shortcuts', 'F1')
 
         for btn in (self._btn_fmt, self._btn_find, self._btn_repl,
                     self._btn_goto, self._btn_cmt,
-                    self._btn_undo, self._btn_redo):
+                    self._btn_undo, self._btn_redo,
+                    self._btn_preview):
             tb.addWidget(btn)
 
         tb.addStretch()
         tb.addWidget(self._btn_help)
         root.addWidget(toolbar)
 
-        # ── Editor ─────────────────────
+        # ── Editor + Preview splitter ───
+        self._body_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._body_splitter.setHandleWidth(4)
+
         self._edit = _CodeEdit()
         mono = QFont('Consolas', 11)
         mono.setStyleHint(QFont.StyleHint.Monospace)
@@ -507,7 +718,25 @@ class XmlEditor(QWidget):
         self._edit.setPlaceholderText('Open an XML file to edit…')
         self._edit.setTabStopDistance(28)
         self._highlighter = _XmlHighlighter(self._edit.document())
-        root.addWidget(self._edit, 1)
+        self._body_splitter.addWidget(self._edit)
+
+        # ── Live preview pane (hidden by default) ───
+        self._preview = QTextBrowser()
+        self._preview.setOpenLinks(False)
+        self._preview.setStyleSheet(
+            'background:#ffffff;border:none;border-left:1px solid #e2e8f0;'
+        )
+        self._preview.setHtml(
+            _PREVIEW_CSS +
+            '<body><p class="preview-empty">'
+            'Click <b>□ Preview</b> in the toolbar to see a live rendered view.'
+            '</p></body>'
+        )
+        self._preview.setVisible(False)
+        self._body_splitter.addWidget(self._preview)
+        self._body_splitter.setSizes([600, 500])
+
+        root.addWidget(self._body_splitter, 1)
 
         # Install the tooltip filter **after** the editor is created
         self._edit.viewport().installEventFilter(self._edit)
@@ -523,7 +752,14 @@ class XmlEditor(QWidget):
         self._val_timer.timeout.connect(self._run_validation)
         self._edit.document().contentsChanged.connect(self._val_timer.start)
 
-        # ── Toolbar connections ───────────────
+        # ── Debounced preview timer ───────
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(600)
+        self._preview_timer.timeout.connect(self._update_preview)
+        self._edit.document().contentsChanged.connect(self._on_content_changed_for_preview)
+
+        # ── Toolbar connections ───────────
         self._btn_fmt.clicked.connect(self._format_xml)
         self._btn_find.clicked.connect(self._show_find)
         self._btn_repl.clicked.connect(self._show_find_replace)
@@ -531,6 +767,7 @@ class XmlEditor(QWidget):
         self._btn_cmt.clicked.connect(self._toggle_comment)
         self._btn_undo.clicked.connect(self._edit.undo)
         self._btn_redo.clicked.connect(self._edit.redo)
+        self._btn_preview.clicked.connect(self._toggle_preview)
         self._btn_help.clicked.connect(self._show_shortcuts)
 
         # ── Keyboard shortcuts ───────────────
@@ -540,6 +777,7 @@ class XmlEditor(QWidget):
         QShortcut(QKeySequence('Ctrl+G'),       self).activated.connect(self._goto_line)
         QShortcut(QKeySequence('Ctrl+/'),       self).activated.connect(self._toggle_comment)
         QShortcut(QKeySequence('F1'),           self).activated.connect(self._show_shortcuts)
+        QShortcut(QKeySequence('Ctrl+P'),       self).activated.connect(self._toggle_preview)
 
         # ── WF2 parity: emphasis tag shortcuts ────────────────────────
         QShortcut(QKeySequence('Alt+B'), self).activated.connect(
@@ -717,3 +955,31 @@ class XmlEditor(QWidget):
     def format_xml(self):
         """Pretty-print the XML in-place (no-op if invalid)."""
         self._format_xml()
+    # -------------------------------------------------------------------
+    # Live preview
+    # -------------------------------------------------------------------
+    def _toggle_preview(self):
+        """Show or hide the live preview pane."""
+        visible = not self._preview.isVisible()
+        self._preview.setVisible(visible)
+        self._btn_preview.setChecked(visible)
+        self._btn_preview.setText('■ Preview' if visible else '□ Preview')
+        if visible:
+            self._update_preview()
+
+    def _on_content_changed_for_preview(self):
+        """Start (or restart) the preview debounce timer if the pane is open."""
+        if self._preview.isVisible():
+            self._preview_timer.start()
+
+    def _update_preview(self):
+        """Re-render the XML into the preview pane."""
+        if not self._preview.isVisible():
+            return
+        xml_text = self._edit.toPlainText()
+        html = _render_xml_preview(xml_text)
+        sb = self._preview.verticalScrollBar()
+        old_val = sb.value()
+        self._preview.setHtml(html)
+        QTimer.singleShot(0, lambda: sb.setValue(min(old_val, sb.maximum())))
+
