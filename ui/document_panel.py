@@ -1,5 +1,5 @@
 # ui/document_panel.py
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QTextEdit
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QTextEdit, QProgressBar
 from PySide6.QtGui import QTextCursor, QColor
 from PySide6.QtCore import Qt, QTimer
 
@@ -15,7 +15,9 @@ _CSS = """
     color: #1a1a1a;
     background: #ffffff;
   }
-  p { margin: 4px 0; }
+  /* .bl is used by differ._p() for every unchanged paragraph so the style
+     lives here once instead of being repeated inline on 30 000+ elements. */
+  p, .bl { margin: 3px 0; line-height: 1.6; }
 
   b, strong,
   span[style*="font-weight:bold"]   { font-weight: bold; }
@@ -42,6 +44,12 @@ _PLACEHOLDER = _CSS + """
 
 _STYLE_VIEW = 'background:#ffffff;border:none;'
 
+# Load the first chunk synchronously, defer the rest via QTimer so the UI
+# stays responsive on large documents.  200 KB per chunk gives a good
+# balance: fewer round-trips through the event loop while still letting
+# Qt paint/process input events between chunks.
+_CHUNK_CHARS = 200_000
+
 
 class DocumentPanel(QWidget):
     """Side‑by‑side compare panel.
@@ -64,16 +72,88 @@ class DocumentPanel(QWidget):
         self.browser.setHtml(_PLACEHOLDER)
         layout.addWidget(self.browser)
 
+        # Thin progress bar shown while large documents stream into the panel.
+        self._prog = QProgressBar()
+        self._prog.setTextVisible(False)
+        self._prog.setFixedHeight(3)
+        self._prog.setStyleSheet(
+            'QProgressBar{border:none;background:#e2e8f0;}'
+            'QProgressBar::chunk{background:#6366f1;}'
+        )
+        self._prog.hide()
+        layout.addWidget(self._prog)
+
+        self._load_gen = 0   # incremented on every set_html(); stale deferred chunks bail out
+        self._load_total = 0
+
     # -------------------------------------------------------------------
     def set_html(self, content: str):
         self.browser.setStyleSheet(_STYLE_VIEW)
-        # Preserve the caret/scroll position when re‑rendering after a compare.
         sb = self.browser.verticalScrollBar()
-        pos = sb.value()
+        saved_pos = sb.value()
+
+        self._load_gen += 1
+        gen = self._load_gen
+
+        if len(content) <= _CHUNK_CHARS:
+            self._prog.hide()
+            self.browser.setHtml(
+                f'<html><head>{_CSS}</head><body>{content}</body></html>'
+            )
+            sb.setValue(min(saved_pos, sb.maximum()))
+            return
+
+        # Show a thin progress bar while the rest streams in.
+        self._load_total = len(content)
+        self._prog.setMaximum(self._load_total)
+        self._prog.setValue(0)
+        self._prog.show()
+
+        # Load the first chunk now so the panel shows content immediately,
+        # then schedule the remainder via zero-delay timers so Qt can process
+        # paint/input events between chunks.
+        split = content.rfind('</p>', 0, _CHUNK_CHARS + 500)
+        split = (split + 4) if split >= 0 else _CHUNK_CHARS
+        first, rest = content[:split], content[split:]
+
         self.browser.setHtml(
-            f'<html><head>{_CSS}</head><body>{content}</body></html>'
+            f'<html><head>{_CSS}</head><body>{first}</body></html>'
         )
-        sb.setValue(min(pos, sb.maximum()))
+        sb.setValue(min(saved_pos, sb.maximum()))
+        self._prog.setValue(len(first))
+
+        if rest:
+            QTimer.singleShot(0, lambda: self._append_html(rest, gen))
+        else:
+            self._prog.hide()
+
+    # -------------------------------------------------------------------
+    def _append_html(self, fragment: str, gen: int):
+        """Append one chunk of HTML at the document's end, then reschedule."""
+        if gen != self._load_gen:
+            self._prog.hide()
+            return   # a newer set_html() was called; discard stale work
+
+        if len(fragment) <= _CHUNK_CHARS:
+            to_add, rest = fragment, ''
+        else:
+            split = fragment.rfind('</p>', 0, _CHUNK_CHARS + 500)
+            if split >= 0:
+                to_add, rest = fragment[:split + 4], fragment[split + 4:]
+            else:
+                to_add, rest = fragment, ''
+
+        cur = self.browser.textCursor()
+        cur.movePosition(QTextCursor.MoveOperation.End)
+        cur.insertHtml(to_add)
+
+        loaded = self._load_total - len(rest) if self._load_total else 0
+        self._prog.setValue(loaded)
+
+        if rest:
+            QTimer.singleShot(0, lambda: self._append_html(rest, gen))
+        else:
+            self._prog.hide()
 
     # -------------------------------------------------------------------
     def set_plain(self, text: str):
@@ -149,6 +229,16 @@ class DocumentPanel(QWidget):
         if cursor:
             self.browser.setTextCursor(cursor)
             self.browser.ensureCursorVisible()
+            # Centre the target line in the viewport so the user doesn't
+            # have to hunt for a highlight that's just barely on-screen.
+            sb       = self.browser.verticalScrollBar()
+            vp_h     = self.browser.viewport().height()
+            rect     = self.browser.cursorRect(cursor)
+            # rect.y() is in viewport coords after ensureCursorVisible;
+            # absolute document position = current scroll + rect.y()
+            abs_top  = sb.value() + rect.y()
+            centered = abs_top - vp_h // 2 + rect.height() // 2
+            sb.setValue(max(0, min(centered, sb.maximum())))
             self._flash(cursor)
 
     # -------------------------------------------------------------------

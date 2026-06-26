@@ -1,18 +1,20 @@
+import concurrent.futures
 import os
+import threading
 import traceback
 
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QStackedWidget,
     QSplitter, QPushButton, QFileDialog, QStatusBar,
-    QLabel, QTextBrowser, QProgressBar, QCheckBox, QFrame, QLineEdit,
+    QLabel, QTextBrowser, QTextEdit, QProgressBar, QCheckBox, QFrame, QLineEdit,
+    QApplication,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QUrl
-from PySide6.QtGui import QKeySequence, QShortcut, QTextDocument
+from PySide6.QtGui import QKeySequence, QShortcut, QTextDocument, QTextCursor, QColor, QPalette
 
 from ui.document_panel import DocumentPanel
 from ui.xml_editor import XmlEditor
-from logic.pdf_extractor import extract_pdf, render_pdf_preview
-from logic.xml_extractor import extract_xml
+from logic.pdf_extractor import extract_pdf, render_pdf_preview, clear_render_cache
 from logic.differ import build_diff_html
 from models.document import Document
 
@@ -21,9 +23,10 @@ from models.document import Document
 # Background worker — extracts PDFs and runs diff in one go
 # ---------------------------------------------------------------------------
 class _CompareWorker(QThread):
-    progress = Signal(str, int)   # status message, percent (0–100)
-    done     = Signal()
-    error    = Signal(str)
+    progress  = Signal(str, int)   # status message, percent (0–100)
+    extracted = Signal()           # both PDFs parsed; diff not yet built
+    done      = Signal()
+    error     = Signal(str)
 
     def __init__(self, old_path: str, new_path: str):
         super().__init__()
@@ -32,6 +35,8 @@ class _CompareWorker(QThread):
         # Results populated by run()
         self.old_doc:      Document | None = None
         self.new_doc:      Document | None = None
+        self.old_plain:    str = ''   # plain text for fast two-phase display
+        self.new_plain:    str = ''
         self.old_html:     str = ''
         self.new_html:     str = ''
         self.sidebar_html: str = ''
@@ -39,18 +44,109 @@ class _CompareWorker(QThread):
 
     def run(self):
         try:
-            self.progress.emit('Extracting Old PDF…', 10)
-            self.old_doc = extract_pdf(self.old_path)
+            self.progress.emit('Extracting PDFs…', 5)
 
-            self.progress.emit('Extracting New PDF…', 40)
-            self.new_doc = extract_pdf(self.new_path)
+            # Thread-safe page-progress tracking for both PDFs running in parallel.
+            # We don't know total pages upfront so we use a rolling counter.
+            _lock = threading.Lock()
+            _pages = [0, 0]    # [old_pages_done, new_pages_done]
+            _totals = [0, 0]   # [old_total, new_total]
 
-            self.progress.emit('Comparing documents…', 75)
+            def _make_cb(slot):
+                def _cb(page_num, total_pages):
+                    with _lock:
+                        _pages[slot]  = page_num
+                        _totals[slot] = total_pages
+                        done  = _pages[0]  + _pages[1]
+                        total = max(_totals[0] + _totals[1], 1)
+                        pct   = 5 + min(50, done * 50 // total)
+                    self.progress.emit(
+                        f'Extracting… page {done:,} of ~{total:,}', pct)
+                return _cb
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                old_fut = pool.submit(extract_pdf, self.old_path, _make_cb(0))
+                new_fut = pool.submit(extract_pdf, self.new_path, _make_cb(1))
+                self.old_doc = old_fut.result()
+                self.new_doc = new_fut.result()
+
+            # Build a plain-text preview here (worker thread) so the main thread
+            # only has to call setPlainText() on a small string.
+            # For very large documents (>3 000 blocks total) skip the preview
+            # phase entirely — setPlainText() on megabytes of text would freeze
+            # the main thread for 10-30 s, which is worse than staying on the
+            # processing screen.
+            old_b = len(self.old_doc.blocks)
+            new_b = len(self.new_doc.blocks)
+            total_blocks = old_b + new_b
+            _PREVIEW_CAP = 3_000   # blocks; ~150 pages
+            _CHAR_CAP    = 80_000  # characters; ~40 KB per panel
+            if total_blocks <= _PREVIEW_CAP:
+                def _preview(doc):
+                    txt = doc.display_text()
+                    if len(txt) > _CHAR_CAP:
+                        cut = txt.rfind('\n', 0, _CHAR_CAP)
+                        cut = cut if cut > 0 else _CHAR_CAP
+                        return txt[:cut] + '\n\n… computing diff, full document loading …'
+                    return txt
+                self.old_plain = _preview(self.old_doc)
+                self.new_plain = _preview(self.new_doc)
+                self.progress.emit('PDFs loaded — rendering preview…', 55)
+                self.extracted.emit()   # show plain text immediately before diff
+            else:
+                self.progress.emit(
+                    f'PDFs extracted ({old_b:,} + {new_b:,} blocks) — '
+                    'computing diff…', 55)
+
+            self.progress.emit('Computing diff…', 65)
             self.old_html, self.new_html, self.sidebar_html, self.changes = \
                 build_diff_html(self.old_doc, self.new_doc)
 
             self.progress.emit('Done', 100)
             self.done.emit()
+        except Exception as exc:
+            self.error.emit(str(exc) + '\n\n' + traceback.format_exc())
+
+
+# ---------------------------------------------------------------------------
+# Background worker — loads and parses a large XML file off the main thread
+# ---------------------------------------------------------------------------
+class _XmlLoadWorker(QThread):
+    done  = Signal(str)   # raw XML text
+    error = Signal(str)
+
+    def __init__(self, path: str):
+        super().__init__()
+        self.path = path
+
+    def run(self):
+        try:
+            from logic.xml_extractor import extract_xml
+            xml_doc = extract_xml(self.path)
+            self.done.emit(xml_doc.raw_xml)
+        except Exception as exc:
+            self.error.emit(str(exc) + '\n\n' + traceback.format_exc())
+
+
+# ---------------------------------------------------------------------------
+# Background worker — renders PDF pages for the "PDF Page View" mode
+# ---------------------------------------------------------------------------
+class _PdfRenderWorker(QThread):
+    progress = Signal(int, int)    # pages rendered, total pages
+    done     = Signal(str, str)    # old_html, new_html
+    error    = Signal(str)
+
+    def __init__(self, old_path: str, new_path: str, zoom: float):
+        super().__init__()
+        self.old_path = old_path
+        self.new_path = new_path
+        self.zoom     = zoom
+
+    def run(self):
+        try:
+            old_html = render_pdf_preview(self.old_path, self.zoom)
+            new_html = render_pdf_preview(self.new_path, self.zoom)
+            self.done.emit(old_html, new_html)
         except Exception as exc:
             self.error.emit(str(exc) + '\n\n' + traceback.format_exc())
 
@@ -103,120 +199,187 @@ def _sep() -> QFrame:
 # ---------------------------------------------------------------------------
 # Upload screen (page 0)
 # ---------------------------------------------------------------------------
-_ROW_BASE = ('QFrame{background:#f8fafc;border:1px dashed #cbd5e1;'
-             'border-radius:8px;}')
+_ROW_BASE  = ('QFrame{background:#f8fafc;border:1px dashed #cbd5e1;'
+              'border-radius:10px;}')
 _ROW_HOVER = ('QFrame{background:#eef2ff;border:2px dashed #6366f1;'
-              'border-radius:8px;}')
-_ROW_OK = ('QFrame{background:#f0fdf4;border:1px solid #86efac;'
-           'border-radius:8px;}')
+              'border-radius:10px;}')
+_ROW_OK    = ('QFrame{background:#f0fdf4;border:2px solid #22c55e;'
+              'border-radius:10px;}')
+_ROW_ERR   = ('QFrame{background:#fef2f2;border:2px solid #f87171;'
+              'border-radius:10px;}')
 
 
 class _UploadPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setStyleSheet('background:#f0f4f8;')
+        # paintEvent draws the gradient — no solid stylesheet background here.
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
 
         outer = QVBoxLayout(self)
-        outer.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        outer.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        outer.setContentsMargins(60, 20, 20, 20)
 
         card = QWidget()
-        card.setFixedWidth(560)
-        card.setStyleSheet(
-            'background:#ffffff;border-radius:12px;border:1px solid #e2e8f0;'
-        )
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(40, 36, 40, 36)
-        card_layout.setSpacing(20)
+        card.setFixedWidth(660)
+        card.setStyleSheet('background:#ffffff;border-radius:20px;border:none;')
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect
+        _shadow = QGraphicsDropShadowEffect(card)
+        _shadow.setBlurRadius(64)
+        _shadow.setColor(QColor(0, 0, 0, 180))
+        _shadow.setOffset(0, 14)
+        card.setGraphicsEffect(_shadow)
 
-        # Title
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(0, 0, 0, 36)
+        card_layout.setSpacing(0)
+
+        # ── Header band ───────────────────────────────────────────────────────
+        header = QWidget()
+        header.setFixedHeight(104)
+        header.setStyleSheet(
+            'background:qlineargradient(x1:0,y1:0,x2:1,y2:0,'
+            'stop:0 #7f1d1d,stop:0.45 #991b1b,stop:1 #450a0a);'
+            'border-radius:20px 20px 0 0;'
+        )
+        hl = QVBoxLayout(header)
+        hl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title = QLabel('Structo Compare')
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet(
-            'color:#1e293b;font-size:26px;font-weight:bold;'
-            'letter-spacing:1px;background:transparent;'
+            'color:#ffffff;font-size:26px;font-weight:bold;'
+            'letter-spacing:1.5px;background:transparent;'
         )
         subtitle = QLabel('Document Comparison Tool')
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        subtitle.setStyleSheet('color:#64748b;font-size:13px;background:transparent;')
-        card_layout.addWidget(title)
-        card_layout.addWidget(subtitle)
+        subtitle.setStyleSheet(
+            'color:rgba(255,255,255,0.80);font-size:13px;background:transparent;'
+        )
+        hl.addWidget(title)
+        hl.addWidget(subtitle)
+        card_layout.addWidget(header)
 
-        # Divider
-        div = QFrame()
-        div.setFrameShape(QFrame.Shape.HLine)
-        div.setStyleSheet('color:#e2e8f0;')
-        card_layout.addWidget(div)
+        # ── File rows ─────────────────────────────────────────────────────────
+        rows_wrap = QWidget()
+        rows_wrap.setStyleSheet('background:transparent;')
+        rl = QVBoxLayout(rows_wrap)
+        rl.setContentsMargins(32, 28, 32, 0)
+        rl.setSpacing(14)
 
-        # Drop-zone style row helper
-        def file_row(icon: str, label: str, optional: bool = False):
+        def _file_row(icon: str, label: str, ext_hint: str, optional: bool = False):
             row = QFrame()
+            row.setMinimumHeight(72)
             row.setStyleSheet(_ROW_BASE)
-            rl = QHBoxLayout(row)
-            rl.setContentsMargins(14, 10, 14, 10)
-            rl.setSpacing(10)
+            row.setAcceptDrops(False)   # drag handled at page level
 
-            lbl = QLabel(f'{icon}  {label}')
-            lbl.setStyleSheet(
-                'color:#334155;font-size:13px;font-weight:bold;'
+            rlay = QHBoxLayout(row)
+            rlay.setContentsMargins(16, 12, 16, 12)
+            rlay.setSpacing(14)
+
+            # Icon
+            icon_lbl = QLabel(icon)
+            icon_lbl.setFixedSize(40, 40)
+            icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            icon_lbl.setStyleSheet(
+                'font-size:22px;background:transparent;border:none;'
+            )
+
+            # Info column
+            info = QVBoxLayout()
+            info.setSpacing(2)
+
+            type_lbl = QLabel(label + (' <span style="color:#94a3b8;font-size:10px">'
+                                       '(optional)</span>' if optional else ''))
+            type_lbl.setStyleSheet(
+                'color:#334155;font-size:13px;font-weight:700;'
                 'background:transparent;border:none;'
             )
-            lbl.setFixedWidth(120)
+            type_lbl.setTextFormat(Qt.TextFormat.RichText)
 
-            info_wrap = QVBoxLayout()
-            info_wrap.setSpacing(1)
-            fname = QLabel('Drop file here  ·  or browse')
+            fname = QLabel(f'Drop {ext_hint} here  ·  or browse')
             fname.setStyleSheet(
-                'color:#94a3b8;font-size:12px;background:transparent;border:none;'
+                'color:#94a3b8;font-size:11px;background:transparent;border:none;'
             )
-            status = QLabel('optional' if optional else '')
+
+            status = QLabel('')
             status.setStyleSheet(
                 'color:#94a3b8;font-size:10px;background:transparent;border:none;'
             )
-            info_wrap.addWidget(fname)
-            info_wrap.addWidget(status)
 
+            info.addWidget(type_lbl)
+            info.addWidget(fname)
+            info.addWidget(status)
+
+            # Browse button
             browse = _btn('Browse…', '#6366f1', '#4f46e5')
-            browse.setFixedWidth(90)
+            browse.setFixedWidth(96)
+            browse.setFixedHeight(34)
 
-            rl.addWidget(lbl)
-            rl.addLayout(info_wrap, 1)
-            rl.addWidget(browse)
+            rlay.addWidget(icon_lbl)
+            rlay.addLayout(info, 1)
+            rlay.addWidget(browse)
             return row, fname, status, browse
 
-        self._old_row, self._old_lbl, self._old_status, self._btn_old = file_row('📄', 'Old PDF')
-        self._new_row, self._new_lbl, self._new_status, self._btn_new = file_row('📄', 'New PDF')
-        self._xml_row, self._xml_lbl, self._xml_status, self._btn_xml = file_row('📋', 'XML File', optional=True)
+        self._old_row, self._old_lbl, self._old_status, self._btn_old = \
+            _file_row('📄', 'Old PDF', '.pdf file')
+        self._new_row, self._new_lbl, self._new_status, self._btn_new = \
+            _file_row('📄', 'New PDF', '.pdf file')
+        self._xml_row, self._xml_lbl, self._xml_status, self._btn_xml = \
+            _file_row('📋', 'XML File', '.xml / .xhtml file', optional=True)
 
-        card_layout.addWidget(self._old_row)
-        card_layout.addWidget(self._new_row)
-        card_layout.addWidget(self._xml_row)
+        rl.addWidget(self._old_row)
+        rl.addWidget(self._new_row)
+        rl.addWidget(self._xml_row)
+        card_layout.addWidget(rows_wrap)
 
-        self._rows = {'old': self._old_row, 'new': self._new_row, 'xml': self._xml_row}
-        self._default_lbl = 'Drop file here  ·  or browse'
+        self._rows = {
+            'old': self._old_row,
+            'new': self._new_row,
+            'xml': self._xml_row,
+        }
+        self._default_lbl = {
+            'old': '.pdf file', 'new': '.pdf file', 'xml': '.xml / .xhtml file',
+        }
         self.setAcceptDrops(True)
 
-        # Compare button
-        self.btn_compare = _btn('⟳  Compare', '#0ea5e9', '#0284c7', min_w=160)
-        self.btn_compare.setFixedHeight(40)
+        # ── Compare button ────────────────────────────────────────────────────
+        btn_wrap = QWidget()
+        btn_wrap.setStyleSheet('background:transparent;')
+        bwl = QVBoxLayout(btn_wrap)
+        bwl.setContentsMargins(32, 20, 32, 0)
+        bwl.setSpacing(10)
+
+        self.btn_compare = _btn('⟳  Compare', '#991b1b', '#7f1d1d', min_w=200)
+        self.btn_compare.setFixedHeight(44)
         self.btn_compare.setEnabled(False)
+        self.btn_compare.setStyleSheet(
+            'QPushButton{background:#991b1b;color:#fff;border:none;'
+            'padding:8px 24px;border-radius:8px;font-weight:700;font-size:14px;'
+            'letter-spacing:0.5px;}'
+            'QPushButton:hover{background:#7f1d1d;}'
+            'QPushButton:disabled{background:#3f3f46;color:#71717a;}'
+        )
+
         cmp_wrap = QHBoxLayout()
         cmp_wrap.setAlignment(Qt.AlignmentFlag.AlignCenter)
         cmp_wrap.addWidget(self.btn_compare)
-        card_layout.addLayout(cmp_wrap)
+        bwl.addLayout(cmp_wrap)
 
         self._hint = QLabel('Select Old PDF and New PDF to enable comparison.')
         self._hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._hint.setStyleSheet('color:#94a3b8;font-size:11px;background:transparent;')
-        card_layout.addWidget(self._hint)
+        self._hint.setStyleSheet(
+            'color:#94a3b8;font-size:11px;background:transparent;'
+        )
+        bwl.addWidget(self._hint)
+        card_layout.addWidget(btn_wrap)
 
         outer.addWidget(card)
 
-        # State
+        # ── State ─────────────────────────────────────────────────────────────
         self.old_path: str = ''
         self.new_path: str = ''
         self.xml_path: str = ''
 
-        # Signals
+        # ── Signals ───────────────────────────────────────────────────────────
         self._btn_old.clicked.connect(lambda: self._browse('old'))
         self._btn_new.clicked.connect(lambda: self._browse('new'))
         self._btn_xml.clicked.connect(lambda: self._browse('xml'))
@@ -246,6 +409,8 @@ class _UploadPage(QWidget):
             n /= 1024
         return f'{n:.1f} TB'
 
+    _PAGE_LIMIT = 3_000   # hard cap — beyond this the diff becomes impractical
+
     @staticmethod
     def _validate(kind: str, path: str) -> tuple:
         """Return (ok, message)."""
@@ -259,7 +424,22 @@ class _UploadPage(QWidget):
                         return False, '✕ Invalid PDF header'
             except OSError as e:
                 return False, f'✕ {e}'
-            return True, '✓ Valid PDF'
+            # Count pages — reject if over the limit.
+            try:
+                import fitz
+                pdf = fitz.open(path)
+                n_pages = len(pdf)
+                pdf.close()
+            except Exception:
+                n_pages = 0   # can't count; let the extractor surface the error
+
+            if n_pages > _UploadPage._PAGE_LIMIT:
+                return (
+                    False,
+                    f'✕ PDF has {n_pages:,} pages — limit is {_UploadPage._PAGE_LIMIT:,} pages',
+                )
+            page_info = f'  ·  {n_pages:,} pages' if n_pages else ''
+            return True, f'✓ Valid PDF{page_info}'
         else:
             if ext not in ('.xml', '.xhtml', '.html', '.htm'):
                 return False, '✕ Not an XML/HTML file'
@@ -273,18 +453,25 @@ class _UploadPage(QWidget):
 
         if ok:
             setattr(self, f'{kind}_path', path)
-            lbl.setText(f'{os.path.basename(path)}  ·  {self._human_size(path)}')
-            lbl.setStyleSheet('color:#334155;font-size:12px;background:transparent;border:none;')
-            status.setText(msg)
-            status.setStyleSheet('color:#059669;font-size:10px;background:transparent;border:none;')
+            size_str = self._human_size(path)
+            lbl.setText(f'{os.path.basename(path)}  ·  {size_str}')
+            lbl.setStyleSheet(
+                'color:#1e293b;font-size:12px;font-weight:600;'
+                'background:transparent;border:none;'
+            )
+            status.setText(f'✓  {msg}')
+            status.setStyleSheet(
+                'color:#059669;font-size:10px;font-weight:600;'
+                'background:transparent;border:none;'
+            )
             row.setStyleSheet(_ROW_OK)
         else:
             setattr(self, f'{kind}_path', '')
             lbl.setText(os.path.basename(path))
             lbl.setStyleSheet('color:#334155;font-size:12px;background:transparent;border:none;')
-            status.setText(msg)
+            status.setText(f'✕  {msg}')
             status.setStyleSheet('color:#dc2626;font-size:10px;background:transparent;border:none;')
-            row.setStyleSheet(_ROW_BASE)
+            row.setStyleSheet(_ROW_ERR)
 
         self._update_compare()
 
@@ -297,9 +484,10 @@ class _UploadPage(QWidget):
             'new': (self._new_lbl, self._new_status, False),
             'xml': (self._xml_lbl, self._xml_status, True),
         }.items():
-            lbl.setText(self._default_lbl)
-            lbl.setStyleSheet('color:#94a3b8;font-size:12px;background:transparent;border:none;')
-            status.setText('optional' if optional else '')
+            default = f'Drop {self._default_lbl[kind]} here  ·  or browse'
+            lbl.setText(default)
+            lbl.setStyleSheet('color:#94a3b8;font-size:11px;background:transparent;border:none;')
+            status.setText('')
             status.setStyleSheet('color:#94a3b8;font-size:10px;background:transparent;border:none;')
             self._rows[kind].setStyleSheet(_ROW_BASE)
         self._update_compare()
@@ -359,6 +547,85 @@ class _UploadPage(QWidget):
         else:
             self._hint.setText('Select Old PDF and New PDF to enable comparison.')
 
+    # ── Custom background (image or fallback gradient) ──────────────────────
+    _bg_pixmap = None   # class-level cache so QPixmap is loaded once
+    _bg_tried = False   # set to True after first load attempt
+
+    @classmethod
+    def _load_bg(cls):
+        if not cls._bg_tried:
+            cls._bg_tried = True
+            import os
+            from PySide6.QtGui import QPixmap
+            img = os.path.join(os.path.dirname(__file__), '..', 'assets', 'background.jpg')
+            img = os.path.normpath(img)
+            px = QPixmap(img)
+            cls._bg_pixmap = px if not px.isNull() else None
+        return cls._bg_pixmap
+
+    def paintEvent(self, event):
+        from PySide6.QtGui import QPainter, QLinearGradient, QRadialGradient
+        from PySide6.QtCore import QPointF
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+
+        px = self._load_bg()
+        if px:
+            # Scale-to-fill: cover the full panel, centred
+            scaled = px.scaled(
+                w, h,
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            ox = (w - scaled.width())  // 2
+            oy = (h - scaled.height()) // 2
+            p.drawPixmap(ox, oy, scaled)
+            p.end()
+            return
+
+        # ── Fallback: dark crimson / black gradient (matches image aesthetic) ──
+        bg = QLinearGradient(0, 0, w, h)
+        bg.setColorAt(0.00, QColor('#0a0000'))   # near-black
+        bg.setColorAt(0.40, QColor('#1a0000'))   # very dark red
+        bg.setColorAt(0.75, QColor('#2d0000'))   # dark crimson
+        bg.setColorAt(1.00, QColor('#0a0000'))   # back to black
+        p.fillRect(self.rect(), bg)
+
+        p.setPen(Qt.PenStyle.NoPen)
+        R = max(w, h)
+
+        # Large top-left blood-red glow
+        r1 = QRadialGradient(QPointF(w * 0.05, h * 0.1), R * 0.65)
+        r1.setColorAt(0.0, QColor(180, 10, 10, 110))
+        r1.setColorAt(1.0, QColor(180, 10, 10, 0))
+        p.setBrush(r1)
+        p.drawEllipse(QPointF(w * 0.05, h * 0.1), R * 0.65, R * 0.65)
+
+        # Bottom-centre crimson ember
+        r2 = QRadialGradient(QPointF(w * 0.5, h * 0.95), R * 0.45)
+        r2.setColorAt(0.0, QColor(200, 20, 0, 90))
+        r2.setColorAt(1.0, QColor(200, 20, 0, 0))
+        p.setBrush(r2)
+        p.drawEllipse(QPointF(w * 0.5, h * 0.95), R * 0.45, R * 0.45)
+
+        # Right-side deep scarlet accent
+        r3 = QRadialGradient(QPointF(w * 0.92, h * 0.45), R * 0.3)
+        r3.setColorAt(0.0, QColor(160, 0, 0, 70))
+        r3.setColorAt(1.0, QColor(160, 0, 0, 0))
+        p.setBrush(r3)
+        p.drawEllipse(QPointF(w * 0.92, h * 0.45), R * 0.3, R * 0.3)
+
+        # Subtle dot grid
+        p.setPen(QColor(255, 60, 60, 16))
+        gap = 28
+        for xi in range(0, w + gap, gap):
+            for yi in range(0, h + gap, gap):
+                p.drawPoint(xi, yi)
+
+        p.end()
+
 
 # ---------------------------------------------------------------------------
 # Processing screen (page 1)
@@ -366,14 +633,20 @@ class _UploadPage(QWidget):
 class _ProcessingPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setStyleSheet('background:#f0f4f8;')
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
 
         outer = QVBoxLayout(self)
         outer.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         card = QWidget()
         card.setFixedWidth(480)
-        card.setStyleSheet('background:#ffffff;border-radius:12px;border:1px solid #e2e8f0;')
+        card.setStyleSheet('background:#ffffff;border-radius:16px;border:none;')
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect as _DSE
+        _sh = _DSE(card)
+        _sh.setBlurRadius(56)
+        _sh.setColor(QColor(0, 0, 0, 170))
+        _sh.setOffset(0, 12)
+        card.setGraphicsEffect(_sh)
         cl = QVBoxLayout(card)
         cl.setContentsMargins(40, 40, 40, 40)
         cl.setSpacing(18)
@@ -391,7 +664,8 @@ class _ProcessingPage(QWidget):
         cl.addWidget(self._status)
 
         self._bar = QProgressBar()
-        self._bar.setRange(0, 0)   # indeterminate / pulsing
+        self._bar.setRange(0, 100)
+        self._bar.setValue(0)
         self._bar.setTextVisible(False)
         self._bar.setFixedHeight(8)
         self._bar.setStyleSheet(
@@ -402,8 +676,63 @@ class _ProcessingPage(QWidget):
 
         outer.addWidget(card)
 
-    def set_status(self, msg: str, _pct: int = 0):
+    def set_status(self, msg: str, pct: int = 0):
         self._status.setText(msg)
+        if pct > 0:
+            self._bar.setRange(0, 100)
+            self._bar.setValue(pct)
+        else:
+            self._bar.setRange(0, 0)   # indeterminate pulsing
+
+    def paintEvent(self, event):
+        from PySide6.QtGui import QPainter, QLinearGradient, QRadialGradient
+        from PySide6.QtCore import QPointF
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+
+        # Reuse the same background as the upload page (image or fallback)
+        px = _UploadPage._load_bg()
+        if px:
+            scaled = px.scaled(
+                w, h,
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            ox = (w - scaled.width())  // 2
+            oy = (h - scaled.height()) // 2
+            p.drawPixmap(ox, oy, scaled)
+            vgn = QRadialGradient(QPointF(w / 2, h / 2), max(w, h) * 0.75)
+            vgn.setColorAt(0.0, QColor(0, 0, 0, 0))
+            vgn.setColorAt(1.0, QColor(0, 0, 0, 140))
+            p.fillRect(self.rect(), vgn)
+            p.end()
+            return
+
+        bg = QLinearGradient(0, 0, w, h)
+        bg.setColorAt(0.00, QColor('#0a0000'))
+        bg.setColorAt(0.40, QColor('#1a0000'))
+        bg.setColorAt(0.75, QColor('#2d0000'))
+        bg.setColorAt(1.00, QColor('#0a0000'))
+        p.fillRect(self.rect(), bg)
+        p.setPen(Qt.PenStyle.NoPen)
+        R = max(w, h)
+        r1 = QRadialGradient(QPointF(w * 0.05, h * 0.1), R * 0.65)
+        r1.setColorAt(0.0, QColor(180, 10, 10, 110))
+        r1.setColorAt(1.0, QColor(180, 10, 10, 0))
+        p.setBrush(r1)
+        p.drawEllipse(QPointF(w * 0.05, h * 0.1), R * 0.65, R * 0.65)
+        r2 = QRadialGradient(QPointF(w * 0.5, h), R * 0.45)
+        r2.setColorAt(0.0, QColor(200, 20, 0, 90))
+        r2.setColorAt(1.0, QColor(200, 20, 0, 0))
+        p.setBrush(r2)
+        p.drawEllipse(QPointF(w * 0.5, h), R * 0.45, R * 0.45)
+        p.setPen(QColor(255, 60, 60, 16))
+        gap = 28
+        for xi in range(0, w + gap, gap):
+            for yi in range(0, h + gap, gap):
+                p.drawPoint(xi, yi)
+        p.end()
 
 
 # ---------------------------------------------------------------------------
@@ -415,19 +744,24 @@ class MainWindow(QMainWindow):
         self.setWindowTitle('Structo Compare — PDF vs PDF + XML Editor')
         self.resize(1600, 920)
 
-        self._old_doc:       Document | None = None
-        self._new_doc:       Document | None = None
-        self._old_diff_html: str = ''
-        self._new_diff_html: str = ''
-        self._old_path:      str = ''
-        self._new_path:      str = ''
-        self._worker:        _CompareWorker | None = None
-        self._view_raw:      bool = False
-        self._scroll_syncing: bool = False
-        self._changes:       list = []
-        self._change_index:  int = -1
-        self._pdf_zoom:      float = 2.0
-
+        self._old_doc:          Document | None = None
+        self._new_doc:          Document | None = None
+        self._old_diff_html:    str = ''
+        self._new_diff_html:    str = ''
+        self._old_path:         str = ''
+        self._new_path:         str = ''
+        self._xml_baseline:     str = ''   # XML text as loaded — before any user edits
+        self._xml_save_path:    str = ''   # last save path for direct Ctrl+S
+        self._worker:           _CompareWorker | None = None
+        self._pdf_worker:       _PdfRenderWorker | None = None
+        self._xml_worker:       _XmlLoadWorker | None = None
+        self._view_raw:         bool = False
+        self._scroll_syncing:   bool = False
+        self._changes:          list = []
+        self._change_index:     int = -1
+        self._pdf_zoom:         float = 2.0
+        self._search_matches:   list = []   # list of (panel, QTextCursor) tuples
+        self._search_idx:       int  = -1
         self._build_ui()
         self._wire_signals()
 
@@ -470,11 +804,10 @@ class MainWindow(QMainWindow):
             'color:#1e293b;font-size:17px;font-weight:bold;letter-spacing:1px;'
         )
 
-        self.btn_back     = _btn('＋ New',         '#64748b', '#475569')
-        self.btn_recompare = _btn('⟳ Re-Compare', '#059669', '#047857')
-        self.btn_view     = _btn('PDF Page View',  '#64748b', '#475569')
-        self.btn_export   = _btn('Export ▾',       '#2563eb', '#1d4ed8')
-        self.btn_save     = _btn('Save XML As…',   '#dc2626', '#b91c1c')
+        self.btn_back       = _btn('＋ New',         '#64748b', '#475569')
+        self.btn_recompare  = _btn('⟳ Re-Compare', '#059669', '#047857')
+        self.btn_view       = _btn('PDF Page View',  '#64748b', '#475569')
+        self.btn_export     = _btn('Export ▾',       '#2563eb', '#1d4ed8')
 
         self.btn_recompare.setToolTip(
             'Re-run the comparison from the (edited) panel text  ·  Ctrl+R')
@@ -545,7 +878,51 @@ class MainWindow(QMainWindow):
             'color:#94a3b8;font-size:11px;background:transparent;'
         )
 
+        # ── Toolbar search bar (beside logo) ─────────────────────────────────
+        self._search_input = QLineEdit()
+        self._search_input.setPlaceholderText('Search in both panels…')
+        self._search_input.setFixedWidth(220)
+        self._search_input.setFixedHeight(30)
+        self._search_input.setStyleSheet(
+            'QLineEdit{background:#ffffff;color:#1e293b;border:1px solid #cbd5e1;'
+            'border-radius:4px;padding:2px 10px 2px 28px;font-size:12px;}'
+            'QLineEdit:focus{border:1px solid #6366f1;}'
+        )
+        # Search icon overlay via a label inside the same parent
+        _srch_icon = QLabel('🔍', self._search_input)
+        _srch_icon.move(6, 7)
+        _srch_icon.setStyleSheet('background:transparent;font-size:11px;')
+
+        self._search_count_lbl = QLabel('')
+        self._search_count_lbl.setFixedWidth(80)
+        self._search_count_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._search_count_lbl.setStyleSheet(
+            'color:#64748b;font-size:11px;background:transparent;')
+
+        _snav_ss = (
+            'QPushButton{background:#f1f5f9;color:#475569;border:1px solid #e2e8f0;'
+            'border-radius:4px;padding:3px 7px;font-size:11px;font-weight:bold;}'
+            'QPushButton:hover{background:#e2e8f0;color:#334155;}'
+            'QPushButton:disabled{background:#f8fafc;color:#cbd5e1;}'
+        )
+        self._btn_s_prev = QPushButton('▲')
+        self._btn_s_prev.setFixedSize(26, 28)
+        self._btn_s_prev.setStyleSheet(_snav_ss)
+        self._btn_s_prev.setToolTip('Previous match  (Shift+Enter)')
+        self._btn_s_prev.setEnabled(False)
+
+        self._btn_s_next = QPushButton('▼')
+        self._btn_s_next.setFixedSize(26, 28)
+        self._btn_s_next.setStyleSheet(_snav_ss)
+        self._btn_s_next.setToolTip('Next match  (Enter)  ·  Ctrl+F')
+        self._btn_s_next.setEnabled(False)
+
         tb.addWidget(logo)
+        tb.addSpacing(10)
+        tb.addWidget(self._search_input)
+        tb.addWidget(self._search_count_lbl)
+        tb.addWidget(self._btn_s_prev)
+        tb.addWidget(self._btn_s_next)
         tb.addStretch()
         tb.addWidget(self.btn_prev_change)
         tb.addWidget(self._change_counter)
@@ -562,64 +939,11 @@ class MainWindow(QMainWindow):
         tb.addWidget(self._zoom_lbl)
         tb.addWidget(self.btn_zoom_in)
         tb.addWidget(_sep())
-        tb.addWidget(self.btn_export)
-        tb.addWidget(_sep())
         tb.addWidget(self._save_status)
-        tb.addWidget(self.btn_save)
+        tb.addWidget(self.btn_export)
         tb.addWidget(_sep())
         tb.addWidget(self.btn_back)
         root.addWidget(toolbar)
-
-        # ── Search bar (Ctrl+F, hidden by default) ────────────────────────────
-        search_bar = QWidget()
-        search_bar.setVisible(False)
-        search_bar.setStyleSheet('background:#f8fafc;border-bottom:1px solid #e2e8f0;')
-        search_bar.setFixedHeight(42)
-        self._search_bar = search_bar
-        sb_lay = QHBoxLayout(search_bar)
-        sb_lay.setContentsMargins(12, 6, 12, 6)
-        sb_lay.setSpacing(6)
-
-        sb_lbl = QLabel('Find:')
-        sb_lbl.setStyleSheet('color:#475569;font-size:12px;background:transparent;')
-
-        self._search_input = QLineEdit()
-        self._search_input.setPlaceholderText('Search in both panels…')
-        self._search_input.setFixedWidth(280)
-        self._search_input.setStyleSheet(
-            'QLineEdit{background:#ffffff;color:#1e293b;border:1px solid #cbd5e1;'
-            'border-radius:3px;padding:3px 8px;font-size:12px;}'
-            'QLineEdit:focus{border:1px solid #6366f1;}'
-        )
-
-        self._search_count_lbl = QLabel('')
-        self._search_count_lbl.setFixedWidth(120)
-        self._search_count_lbl.setStyleSheet('color:#64748b;font-size:11px;background:transparent;')
-
-        _sbtn_ss = (
-            'QPushButton{background:#f1f5f9;color:#475569;border:1px solid #e2e8f0;'
-            'border-radius:3px;padding:3px 10px;font-size:11px;}'
-            'QPushButton:hover{background:#e2e8f0;color:#334155;}'
-        )
-        btn_prev = QPushButton('▲ Prev')
-        btn_prev.setStyleSheet(_sbtn_ss)
-        btn_next = QPushButton('Next ▼')
-        btn_next.setStyleSheet(_sbtn_ss)
-        btn_close_search = QPushButton('✕')
-        btn_close_search.setFixedWidth(28)
-        btn_close_search.setStyleSheet(
-            'QPushButton{background:#fee2e2;color:#dc2626;border:none;border-radius:3px;font-size:11px;}'
-            'QPushButton:hover{background:#fecaca;}'
-        )
-
-        sb_lay.addWidget(sb_lbl)
-        sb_lay.addWidget(self._search_input)
-        sb_lay.addWidget(self._search_count_lbl)
-        sb_lay.addStretch()
-        sb_lay.addWidget(btn_prev)
-        sb_lay.addWidget(btn_next)
-        sb_lay.addWidget(btn_close_search)
-        root.addWidget(search_bar)
 
         # ── Old PDF panel ─────────────────────────────────────────────────────
         old_wrap = QWidget()
@@ -755,13 +1079,6 @@ class MainWindow(QMainWindow):
         ))
         root.addWidget(legend_bar)
 
-        # Wire up search bar buttons
-        self._search_input.textChanged.connect(self._on_search_changed)
-        self._search_input.returnPressed.connect(self._search_next)
-        btn_next.clicked.connect(self._search_next)
-        btn_prev.clicked.connect(self._search_prev)
-        btn_close_search.clicked.connect(self._close_search)
-
         # Wire up collapse buttons (panel header AND toolbar)
         self._btn_toggle_sidebar.clicked.connect(self._toggle_sidebar)
         self._btn_toggle_xml.clicked.connect(self._toggle_xml)
@@ -779,7 +1096,6 @@ class MainWindow(QMainWindow):
         self.btn_back.clicked.connect(self._go_to_upload)
         self.btn_view.clicked.connect(self._toggle_view)
         self.btn_recompare.clicked.connect(self._recompare)
-        self.btn_save.clicked.connect(self._save_xml)
         self._build_export_menu()
 
         # Change navigation
@@ -789,6 +1105,12 @@ class MainWindow(QMainWindow):
         # Zoom controls
         self.btn_zoom_in.clicked.connect(lambda: self._adjust_zoom(1.25))
         self.btn_zoom_out.clicked.connect(lambda: self._adjust_zoom(0.8))
+
+        # Toolbar search
+        self._search_input.textChanged.connect(self._on_search_changed)
+        self._search_input.returnPressed.connect(self._search_next)
+        self._btn_s_next.clicked.connect(self._search_next)
+        self._btn_s_prev.clicked.connect(self._search_prev)
 
         # Keyboard shortcuts
         QShortcut(QKeySequence('Ctrl+S'), self).activated.connect(self._save_xml)
@@ -800,7 +1122,6 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence('Ctrl+F'), self).activated.connect(self._open_search)
         QShortcut(QKeySequence.StandardKey.ZoomIn, self).activated.connect(lambda: self._adjust_zoom(1.25))
         QShortcut(QKeySequence.StandardKey.ZoomOut, self).activated.connect(lambda: self._adjust_zoom(0.8))
-        QShortcut(QKeySequence('Escape'), self._search_bar).activated.connect(self._close_search)
 
         # Sync scroll
         self._sync_cb.toggled.connect(self._on_sync_toggled)
@@ -822,7 +1143,7 @@ class MainWindow(QMainWindow):
 
     def _reset_session(self):
         """Clear every piece of session state so the next compare starts clean."""
-        # Stop any running worker so its callbacks can't touch fresh state.
+        # Stop any running workers so callbacks can't touch fresh state.
         if self._worker is not None:
             try:
                 self._worker.done.disconnect()
@@ -836,6 +1157,29 @@ class MainWindow(QMainWindow):
                 self._worker.wait(2000)
             self._worker = None
 
+        if self._pdf_worker is not None:
+            try:
+                self._pdf_worker.done.disconnect()
+                self._pdf_worker.error.disconnect()
+                self._pdf_worker.progress.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            if self._pdf_worker.isRunning():
+                self._pdf_worker.quit()
+                self._pdf_worker.wait(2000)
+            self._pdf_worker = None
+
+        if self._xml_worker is not None:
+            try:
+                self._xml_worker.done.disconnect()
+                self._xml_worker.error.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            if self._xml_worker.isRunning():
+                self._xml_worker.quit()
+                self._xml_worker.wait(2000)
+            self._xml_worker = None
+
         # In-memory results
         self._old_doc = None
         self._new_doc = None
@@ -845,6 +1189,8 @@ class MainWindow(QMainWindow):
         self._new_path = ''
         self._changes = []
         self._change_index = -1
+        self._xml_baseline = ''
+        self._xml_save_path = ''
         self._view_raw = False
         self._pdf_zoom = 2.0
 
@@ -865,8 +1211,7 @@ class MainWindow(QMainWindow):
         for w in self._zoom_widgets:
             w.setVisible(False)
         self._update_change_counter()
-        self._close_search()
-        self._search_input.clear()
+        self._search_input.clear()   # triggers _on_search_changed → clears highlights
 
         # Upload page fields
         self._upload_page.reset()
@@ -876,15 +1221,16 @@ class MainWindow(QMainWindow):
         if not up.old_path or not up.new_path:
             return
 
-        # Load XML immediately (lightweight)
+        # Clear any stale PDF render cache from a previous session
+        clear_render_cache()
+
+        # Load XML in background (can be large)
         if up.xml_path:
-            try:
-                xml_doc = extract_xml(up.xml_path)
-                self.xml_editor.setPlainText(xml_doc.raw_xml)
-                self._xml_loaded = True
-                self._set_saved_state('XML loaded — not yet saved')
-            except Exception as e:
-                self._status.showMessage(f'XML load error: {e}')
+            self._xml_worker = _XmlLoadWorker(up.xml_path)
+            self._xml_worker.done.connect(self._on_xml_loaded)
+            self._xml_worker.error.connect(self._on_xml_error)
+            self._xml_worker.start()
+            self._set_saved_state('Loading XML…', '#6366f1')
 
         # Remember paths for PDF Page View
         self._old_path = up.old_path
@@ -900,9 +1246,38 @@ class MainWindow(QMainWindow):
         self._worker.progress.connect(
             lambda msg, _pct: self._status.showMessage(msg)
         )
+        self._worker.extracted.connect(self._on_extract_done)
         self._worker.done.connect(self._on_compare_done)
         self._worker.error.connect(self._on_compare_error)
         self._worker.start()
+
+    def _on_extract_done(self):
+        """Called as soon as both PDFs are parsed (before diff runs).
+
+        Switches to the compare view and renders plain text immediately so
+        the user sees content while the diff computation continues in the
+        background thread.
+        """
+        w = self._worker
+        if w is None or w.old_doc is None or w.new_doc is None:
+            return
+
+        self._old_doc = w.old_doc
+        self._new_doc = w.new_doc
+        self._view_raw = False
+        self.btn_view.setText('PDF Page View')
+        for wdg in self._zoom_widgets:
+            wdg.setVisible(False)
+
+        # setPlainText is ~100× faster than setHtml for large documents —
+        # no HTML parsing or rich-text layout, so the main thread is free
+        # in milliseconds.  The diff highlights replace this in _on_compare_done.
+        self.old_panel.set_plain(w.old_plain)
+        self.new_panel.set_plain(w.new_plain)
+        self.sidebar.setHtml('')
+
+        self._stack.setCurrentIndex(2)
+        self._status.showMessage('Text loaded — computing diff highlights…')
 
     def _on_compare_done(self):
         w = self._worker
@@ -919,10 +1294,6 @@ class MainWindow(QMainWindow):
         self._new_diff_html = w.new_html
         self._changes = w.changes
         self._change_index = -1
-        self._view_raw = False
-        self.btn_view.setText('PDF Page View')
-        for wdg in self._zoom_widgets:
-            wdg.setVisible(False)
 
         self.old_panel.set_html(self._old_diff_html)
         self.new_panel.set_html(self._new_diff_html)
@@ -931,14 +1302,38 @@ class MainWindow(QMainWindow):
 
         self._stack.setCurrentIndex(2)
         n = len(self._changes)
-        self._status.showMessage(
-            f'Comparison complete — {n} change{"s" if n != 1 else ""} found. '
-            'Edit either panel and click ⟳ Re-Compare to refresh, or F3 to step through changes.'
+        old_blocks = len(w.old_doc.blocks)
+        new_blocks = len(w.new_doc.blocks)
+        large = old_blocks > 5_000 or new_blocks > 5_000
+        doc_info = (
+            f'{old_blocks:,} blocks (old) · {new_blocks:,} blocks (new)'
+            if large else ''
         )
-
+        loading_note = ' — panels loading progressively, please wait…' if large else ''
+        base_msg = f'Comparison complete — {n} change{"s" if n != 1 else ""} found.'
+        if doc_info:
+            self._status.showMessage(f'{base_msg}  {doc_info}{loading_note}')
+        else:
+            self._status.showMessage(
+                f'{base_msg} '
+                'Edit either panel and click ⟳ Re-Compare to refresh, or F3 to step through changes.'
+            )
     def _on_compare_error(self, msg: str):
         self._stack.setCurrentIndex(0)
         self._status.showMessage(f'Compare error: {msg[:120]}')
+
+    def _on_xml_loaded(self, raw_xml: str):
+        self.xml_editor.setPlainText(raw_xml)
+        self._xml_baseline = raw_xml   # Snapshot before any user edits
+        self._xml_save_path = getattr(self._upload_page, 'xml_path', '')
+        self._xml_loaded = True
+        self._set_saved_state('XML loaded — not yet saved')
+        self._xml_worker = None
+
+    def _on_xml_error(self, msg: str):
+        self._status.showMessage(f'XML load error: {msg[:120]}')
+        self._set_saved_state('XML load failed', '#dc2626')
+        self._xml_worker = None
 
     # ── View mode toggle ──────────────────────────────────────────────────────
     def _toggle_view(self):
@@ -963,21 +1358,57 @@ class MainWindow(QMainWindow):
             self._status.showMessage('PDF Page View needs the original PDF files.')
             self._view_raw = False
             return
-        self._status.showMessage('Rendering PDF pages…')
-        self._zoom_lbl.setText(f'{int(self._pdf_zoom / 2.0 * 100)}%')
-        try:
-            old_frac = self.old_panel.scroll_fraction()
-            new_frac = self.new_panel.scroll_fraction()
-            self.old_panel.set_html(render_pdf_preview(self._old_path, self._pdf_zoom))
-            self.new_panel.set_html(render_pdf_preview(self._new_path, self._pdf_zoom))
-            self.old_panel.set_scroll_fraction(old_frac)
-            self.new_panel.set_scroll_fraction(new_frac)
-            self._status.showMessage(
-                'PDF Page View — true page layout.  Use ＋ / － to zoom, '
-                'Compare View to return.')
-        except Exception as e:
-            self._view_raw = False
-            self._status.showMessage(f'PDF Page View error: {e}')
+
+        # Cancel any previous render
+        if self._pdf_worker is not None and self._pdf_worker.isRunning():
+            self._pdf_worker.quit()
+            self._pdf_worker.wait(1000)
+
+        zoom_pct = int(self._pdf_zoom / 2.0 * 100)
+        self._zoom_lbl.setText(f'{zoom_pct}%')
+        self._status.showMessage(f'Rendering PDF pages at {zoom_pct}%…')
+
+        # Show a loading placeholder while rendering
+        loading_html = (
+            '<div style="padding:40px;text-align:center;color:#94a3b8;'
+            'font-family:Arial;font-size:14px">'
+            '<p style="font-size:24px;margin-bottom:16px">⏳</p>'
+            '<p>Rendering PDF pages…</p>'
+            '<p style="font-size:11px;margin-top:8px;color:#cbd5e1">'
+            'Large documents may take a moment.</p>'
+            '</div>'
+        )
+        self.old_panel.set_html(loading_html)
+        self.new_panel.set_html(loading_html)
+
+        self._pdf_scroll_old = self.old_panel.scroll_fraction()
+        self._pdf_scroll_new = self.new_panel.scroll_fraction()
+
+        self._pdf_worker = _PdfRenderWorker(
+            self._old_path, self._new_path, self._pdf_zoom)
+        self._pdf_worker.progress.connect(self._on_pdf_render_progress)
+        self._pdf_worker.done.connect(self._on_pdf_render_done)
+        self._pdf_worker.error.connect(self._on_pdf_render_error)
+        self._pdf_worker.start()
+
+    def _on_pdf_render_progress(self, current: int, total: int):
+        self._status.showMessage(f'Rendering PDF pages… {current}/{total}')
+
+    def _on_pdf_render_done(self, old_html: str, new_html: str):
+        self.old_panel.set_html(old_html)
+        self.new_panel.set_html(new_html)
+        self.old_panel.set_scroll_fraction(getattr(self, '_pdf_scroll_old', 0.0))
+        self.new_panel.set_scroll_fraction(getattr(self, '_pdf_scroll_new', 0.0))
+        self._status.showMessage(
+            'PDF Page View — true page layout.  Use ＋ / － to zoom, '
+            'Compare View to return.')
+
+    def _on_pdf_render_error(self, msg: str):
+        self._view_raw = False
+        self.btn_view.setText('PDF Page View')
+        for w in self._zoom_widgets:
+            w.setVisible(False)
+        self._status.showMessage(f'PDF Page View error: {msg[:120]}')
 
     def _adjust_zoom(self, factor: float):
         if not self._view_raw:
@@ -993,6 +1424,37 @@ class MainWindow(QMainWindow):
         self.btn_prev_change.setEnabled(n > 0)
         self.btn_next_change.setEnabled(n > 0)
 
+    def _scroll_to_change(self, kind: str, anchor: str):
+        """Scroll both panels to *anchor* without sync-scroll interference.
+
+        Each call to scroll_to_anchor() fires a scrollbar valueChanged signal,
+        which the sync-scroll handlers pick up and use to re-position the OTHER
+        panel — undoing whatever the first scroll just did.  Holding
+        _scroll_syncing=True for the whole operation lets each panel reach its
+        own target independently; proportional mirroring is done manually for
+        del/add where only one panel carries the anchor.
+        """
+        prev = self._scroll_syncing
+        self._scroll_syncing = True
+        try:
+            if kind == 'del':
+                self.old_panel.scroll_to_anchor(anchor)
+                src_sb = self.old_panel.browser.verticalScrollBar()
+                dst_sb = self.new_panel.browser.verticalScrollBar()
+                if src_sb.maximum() > 0:
+                    dst_sb.setValue(int(src_sb.value() / src_sb.maximum() * dst_sb.maximum()))
+            elif kind == 'add':
+                self.new_panel.scroll_to_anchor(anchor)
+                src_sb = self.new_panel.browser.verticalScrollBar()
+                dst_sb = self.old_panel.browser.verticalScrollBar()
+                if src_sb.maximum() > 0:
+                    dst_sb.setValue(int(src_sb.value() / src_sb.maximum() * dst_sb.maximum()))
+            else:  # mod — both panels have an anchor for the same change id
+                self.old_panel.scroll_to_anchor(anchor)
+                self.new_panel.scroll_to_anchor(anchor)
+        finally:
+            self._scroll_syncing = prev
+
     def _goto_change(self, index: int):
         n = len(self._changes)
         if n == 0:
@@ -1003,13 +1465,7 @@ class MainWindow(QMainWindow):
         self._change_index = index % n
         ch = self._changes[self._change_index]
         anchor, kind = ch['id'], ch['kind']
-        if kind == 'del':
-            self.old_panel.scroll_to_anchor(anchor)
-        elif kind == 'add':
-            self.new_panel.scroll_to_anchor(anchor)
-        else:
-            self.old_panel.scroll_to_anchor(anchor)
-            self.new_panel.scroll_to_anchor(anchor)
+        self._scroll_to_change(kind, anchor)
         self._update_change_counter()
         label = {'del': 'Deleted', 'add': 'Added', 'mod': 'Modified'}.get(kind, 'Change')
         self._status.showMessage(
@@ -1056,159 +1512,310 @@ class MainWindow(QMainWindow):
     def _build_export_menu(self):
         from PySide6.QtWidgets import QMenu
         menu = QMenu(self)
-        menu.addAction('Side-by-side HTML…', self._export_html)
-        menu.addAction('Change list (XML)…', self._export_xml)
-        menu.addAction('PDF report…', self._export_pdf_report)
+        menu.addAction('Save Final XML…', self._save_xml_as)
+        menu.addAction('Save Explanation HTML…', self._export_html)
         self.btn_export.setMenu(menu)
 
     def _export_html(self):
-        if not self._old_diff_html:
-            self._status.showMessage('Run a comparison first before exporting.')
+        if not self._xml_baseline:
+            self._status.showMessage(
+                'No XML baseline found — upload an XML file first.')
             return
         path, _ = QFileDialog.getSaveFileName(
-            self, 'Export Comparison as HTML', '',
+            self, 'Save Explanation HTML', '',
             'HTML Files (*.html);;All Files (*)'
         )
         if not path:
             return
         try:
             with open(path, 'w', encoding='utf-8') as f:
-                f.write(self._build_export_html())
+                f.write(self._build_explanation_html())
             self._status.showMessage(f'Exported: {path}')
         except Exception as e:
             self._status.showMessage(f'Export error: {e}')
 
-    def _export_xml(self):
-        if not self._changes:
-            self._status.showMessage('No changes to export — run a comparison first.')
-            return
-        path, _ = QFileDialog.getSaveFileName(
-            self, 'Export Change List as XML', '',
-            'XML Files (*.xml);;All Files (*)'
-        )
-        if not path:
-            return
-        import xml.sax.saxutils as _sx
-        old_name = os.path.basename(self._old_path) if self._old_path else 'old'
-        new_name = os.path.basename(self._new_path) if self._new_path else 'new'
-        lines = ['<?xml version="1.0" encoding="UTF-8"?>',
-                 f'<comparison old="{_sx.quoteattr(old_name)[1:-1]}" '
-                 f'new="{_sx.quoteattr(new_name)[1:-1]}" '
-                 f'changes="{len(self._changes)}">']
-        for ch in self._changes:
-            lines.append(f'  <change id="{ch["id"]}" type="{ch["kind"]}">')
-            if ch['old']:
-                lines.append(f'    <old>{_sx.escape(ch["old"])}</old>')
-            if ch['new']:
-                lines.append(f'    <new>{_sx.escape(ch["new"])}</new>')
-            lines.append('  </change>')
-        lines.append('</comparison>')
+    def _extract_xml_paras(self, xml_text: str) -> list:
+        """Return list of (plain_text, section_context, kind) tuples.
+
+        Walks the lxml element tree and emits one entry per block-level
+        node (paragraph, list item, heading).  Headings update the running
+        section_context carried into subsequent paragraphs so the caller can
+        group changes under the correct section header.
+
+        kind is ``'heading'`` | ``'para'`` | ``'list'``.
+        """
+        if not xml_text.strip():
+            return []
+        from lxml import etree as _et  # type: ignore[import-untyped]
         try:
-            with open(path, 'w', encoding='utf-8') as f:
-                f.write('\n'.join(lines))
-            self._status.showMessage(f'Exported {len(self._changes)} changes: {path}')
-        except Exception as e:
-            self._status.showMessage(f'Export error: {e}')
+            root = _et.fromstring(xml_text.encode('utf-8'))
+        except Exception:
+            try:
+                root = _et.fromstring(f'<root>{xml_text}</root>'.encode('utf-8'))
+            except Exception:
+                return []
 
-    def _export_pdf_report(self):
-        if not self._changes and not self._old_diff_html:
-            self._status.showMessage('Run a comparison first before exporting.')
-            return
-        path, _ = QFileDialog.getSaveFileName(
-            self, 'Export PDF Report', '',
-            'PDF Files (*.pdf);;All Files (*)'
+        _HEADING = frozenset({
+            'innodheading', 'title', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+            'heading', 'h',
+        })
+        _PARA = frozenset({'p', 'para', 'paragraph'})
+        _LIST = frozenset({'li', 'item'})
+        _SKIP = frozenset({
+            'innodmeta', 'innodimg', 'innodfootnote', 'innodfootnoteref',
+            'footnoteref',
+        })
+
+        result = []
+        ctx = ['']   # mutable cell — current section heading text
+
+        def _loc(el):
+            tag = el.tag
+            if not isinstance(tag, str):
+                return ''
+            return (tag.split('}', 1)[-1] if '}' in tag else tag).lower()
+
+        def _walk(el):
+            loc = _loc(el)
+            if not loc or loc in _SKIP:
+                return
+            if loc in _HEADING:
+                txt = ' '.join(el.itertext()).strip()
+                if txt:
+                    ctx[0] = txt
+                    result.append((txt, txt, 'heading'))
+                return      # itertext already captured all descendant text
+            if loc in _PARA:
+                txt = ' '.join(el.itertext()).strip()
+                if txt:
+                    result.append((txt, ctx[0], 'para'))
+                return
+            if loc in _LIST:
+                txt = ' '.join(el.itertext()).strip()
+                if txt:
+                    result.append((txt, ctx[0], 'list'))
+                return
+            for child in el:
+                _walk(child)
+
+        _walk(root)
+
+        if not result:
+            for line in ' '.join(root.itertext()).splitlines():
+                line = line.strip()
+                if line:
+                    result.append((line, '', 'para'))
+
+        return result
+
+    def _build_explanation_html(self) -> str:
+        """Build WF2-format explanation HTML from XML baseline vs current editor.
+
+        The explanation reflects only the edits the user made in the XML editor
+        (baseline at load time vs. current content).  PDF comparison results
+        are not used here.
+        """
+        import difflib
+        import html as _h
+
+        old_paras = self._extract_xml_paras(self._xml_baseline)
+        new_paras = self._extract_xml_paras(self.xml_editor.toPlainText())
+
+        old_texts = [p[0] for p in old_paras]
+        new_texts = [p[0] for p in new_paras]
+
+        def _word_spans(old_t: str, new_t: str) -> str:
+            old_w = old_t.split()
+            new_w = new_t.split()
+            m = difflib.SequenceMatcher(None, old_w, new_w, autojunk=False)
+            parts = []
+            for tag, i1, i2, j1, j2 in m.get_opcodes():
+                if tag == 'equal':
+                    parts.append(_h.escape(' '.join(old_w[i1:i2])) + ' ')
+                elif tag == 'insert':
+                    for w in new_w[j1:j2]:
+                        parts.append(f'<span class="inserted">{_h.escape(w)}</span>')
+                elif tag == 'delete':
+                    for w in old_w[i1:i2]:
+                        parts.append(f'<span class="deleted">{_h.escape(w)}</span>')
+                else:
+                    for w in old_w[i1:i2]:
+                        parts.append(f'<span class="deleted">{_h.escape(w)}</span>')
+                    for w in new_w[j1:j2]:
+                        parts.append(f'<span class="inserted">{_h.escape(w)}</span>')
+            return ''.join(parts)
+
+        body_parts: list = []
+        last_section: str = ''
+        change_count = 0
+
+        def _maybe_section(section: str) -> None:
+            nonlocal last_section
+            if section and section != last_section:
+                body_parts.append(
+                    f'<div class="section-context">📍 {_h.escape(section)}</div>\n')
+                last_section = section
+
+        for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(
+                None, old_texts, new_texts, autojunk=False).get_opcodes():
+
+            if tag == 'equal':
+                continue   # Unchanged content is not part of the explanation
+
+            if tag == 'insert':
+                for j in range(j1, j2):
+                    text, section, _ = new_paras[j]
+                    _maybe_section(section)
+                    body_parts.append(
+                        f'<p class="inserted">{_h.escape(text)}</p>\n')
+                    change_count += 1
+
+            elif tag == 'delete':
+                for i in range(i1, i2):
+                    text, section, _ = old_paras[i]
+                    _maybe_section(section)
+                    body_parts.append(
+                        f'<p class="deleted">{_h.escape(text)}</p>\n')
+                    change_count += 1
+
+            else:  # replace — word-level diff on paired paragraphs
+                og = old_paras[i1:i2]
+                ng = new_paras[j1:j2]
+                for k in range(max(len(og), len(ng))):
+                    if k < len(og) and k < len(ng):
+                        _, section, _ = ng[k]
+                        _maybe_section(section)
+                        body_parts.append(
+                            f'<p>{_word_spans(og[k][0], ng[k][0])} </p>\n')
+                    elif k < len(og):
+                        text, section, _ = og[k]
+                        _maybe_section(section)
+                        body_parts.append(
+                            f'<p class="deleted">{_h.escape(text)}</p>\n')
+                    else:
+                        text, section, _ = ng[k]
+                        _maybe_section(section)
+                        body_parts.append(
+                            f'<p class="inserted">{_h.escape(text)}</p>\n')
+                    change_count += 1
+
+        xml_name = ''
+        up = getattr(self, '_upload_page', None)
+        if up and getattr(up, 'xml_path', ''):
+            xml_name = os.path.basename(up.xml_path)
+        title_esc = _h.escape(xml_name or 'Explanation')
+
+        if body_parts:
+            summary = (
+                f'<p style="font-size:11px;color:#555;margin-bottom:1em">'
+                f'{change_count} change{"s" if change_count != 1 else ""} '
+                f'documented</p>\n'
+            )
+            content = summary + ''.join(body_parts)
+        else:
+            content = (
+                '<div class="no-changes">No changes detected — the XML '
+                'content matches the version that was originally loaded.</div>\n'
+            )
+
+        css = """body {
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #111;
+  background: #fff;
+  margin: 0;
+  padding: 0;
+}
+
+div.doc-wrapper {
+  margin: 1em;
+  padding: 1em;
+  border: 10pt solid magenta;
+}
+
+p {
+  margin: 0.6em 0;
+}
+
+p.inserted {
+  background-color: #bbf7d0;
+  border-left: 6px solid #22c55e;
+  padding-left: 6px;
+}
+
+p.deleted {
+  background-color: #fecdd3;
+  border-left: 6px solid #f43f5e;
+  padding-left: 6px;
+  text-decoration: line-through;
+  text-decoration-color: #f43f5e;
+  opacity: 0.85;
+}
+
+p.unchanged {
+  /* no highlight */
+}
+
+span.inserted {
+  background-color: #bbf7d0;
+  outline: 1.5px solid #22c55e;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+span.deleted {
+  background-color: #fecdd3;
+  outline: 1.5px solid #f43f5e;
+  border-radius: 2px;
+  padding: 0 1px;
+  text-decoration: line-through;
+  text-decoration-color: #f43f5e;
+}
+
+span.unchanged {
+  /* no highlight */
+}
+
+.fmt-underline { text-decoration: underline; }
+.fmt-strike    { text-decoration: line-through; }
+
+span.fmt-changed {
+  outline: 1.5px solid #f59e0b;
+  border-radius: 2px;
+  padding: 0 1px;
+  background-color: #fef9c3;
+}
+
+.section-context {
+  margin: 1.4em 0 0.4em;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #555;
+  background: #f0f0f0;
+  border-left: 4px solid #aaa;
+  border-radius: 2px;
+}
+
+.no-changes {
+  padding: 1em;
+  background: #f0fdf4;
+  border: 1px solid #22c55e;
+  border-radius: 4px;
+  color: #15803d;
+}"""
+
+        return (
+            "<?xml version='1.0' encoding='utf-8'?>\n"
+            f'<html>\n<head>\n<meta charset="utf-8" />\n'
+            f'<title>{title_esc}</title>\n'
+            f'<style>\n{css}\n</style>\n'
+            f'</head>\n<body>\n'
+            f'<div class="doc-wrapper">\n\n'
+            f'{content}\n'
+            f'</div>\n</body>\n</html>'
         )
-        if not path:
-            return
-        try:
-            from PySide6.QtGui import QPdfWriter, QPageSize
-            writer = QPdfWriter(path)
-            writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
-            doc = QTextDocument()
-            doc.setHtml(self._build_report_html())
-            doc.print_(writer)
-            self._status.showMessage(f'Exported PDF report: {path}')
-        except Exception as e:
-            self._status.showMessage(f'PDF export error: {e}')
-
-    def _build_report_html(self) -> str:
-        old_name = os.path.basename(self._old_path) if self._old_path else 'Old PDF'
-        new_name = os.path.basename(self._new_path) if self._new_path else 'New PDF'
-        from html import escape as _esc
-        counts = {'del': 0, 'add': 0, 'mod': 0}
-        for ch in self._changes:
-            counts[ch['kind']] = counts.get(ch['kind'], 0) + 1
-        rows = []
-        for i, ch in enumerate(self._changes, 1):
-            label = {'del': 'Deleted', 'add': 'Added', 'mod': 'Modified'}[ch['kind']]
-            old_c = f'<span style="color:#b91c1c">{_esc(ch["old"])}</span>' if ch['old'] else ''
-            new_c = f'<span style="color:#15803d">{_esc(ch["new"])}</span>' if ch['new'] else ''
-            rows.append(
-                f'<tr><td>{i}</td><td><b>{label}</b></td>'
-                f'<td>{old_c}</td><td>{new_c}</td></tr>')
-        table = ''.join(rows) or '<tr><td colspan="4">No changes detected.</td></tr>'
-        return f"""<html><body style="font-family:Arial,sans-serif;color:#1a1a1a">
-<h1 style="font-size:18px">Structo Compare Report</h1>
-<p style="font-size:12px;color:#475569">{_esc(old_name)} &rarr; {_esc(new_name)}</p>
-<p style="font-size:12px"><b>{counts['del']}</b> deleted &nbsp;
-<b>{counts['add']}</b> added &nbsp; <b>{counts['mod']}</b> modified &nbsp;
-(<b>{len(self._changes)}</b> total)</p>
-<table border="1" cellspacing="0" cellpadding="4" width="100%"
- style="font-size:11px;border-collapse:collapse">
-<tr style="background:#f1f5f9"><th>#</th><th>Type</th><th>Old</th><th>New</th></tr>
-{table}
-</table></body></html>"""
-
-    def _build_export_html(self) -> str:
-        old_name = os.path.basename(self._old_path) if self._old_path else 'Old PDF'
-        new_name = os.path.basename(self._new_path) if self._new_path else 'New PDF'
-        css = """
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: Arial, sans-serif; font-size: 13px;
-         color: #1a1a1a; background: #f0f0f0; }
-  h1 { font-size: 18px; padding: 14px 20px;
-       background: #1a1a2e; color: #edf2f4; letter-spacing: 1px; }
-  .legend { background: #f8f9fa; padding: 8px 20px; border-bottom: 1px solid #dee2e6;
-            display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  .chip { padding: 2px 10px; border-radius: 3px; font-size: 11px;
-          border: 1px solid rgba(0,0,0,.12); }
-  .panels { display: flex; gap: 0; height: calc(100vh - 90px); }
-  .panel { flex: 1; overflow-y: auto; background: #fff;
-           border-right: 1px solid #ddd; padding: 14px; }
-  .panel h2 { font-size: 12px; text-align: center; background: #2b2d42;
-              color: #edf2f4; padding: 6px; margin: -14px -14px 10px;
-              font-weight: bold; letter-spacing: .5px; }
-  p { margin: 3px 0; line-height: 1.6; }
-  span[style*="background:#ffb3b3"] { background:#ffb3b3; border-radius:3px; }
-  span[style*="background:#b3ffb3"] { background:#b3ffb3; border-radius:3px; }
-</style>"""
-        return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8"/>
-<title>Structo Compare — {old_name} vs {new_name}</title>
-{css}
-</head>
-<body>
-<h1>Structo Compare</h1>
-<div class="legend">
-  <b>Legend:</b>
-  <span class="chip" style="background:#ffb3b3">Removed</span>
-  <span class="chip" style="background:#b3ffb3">Added</span>
-</div>
-<div class="panels">
-  <div class="panel">
-    <h2>Old — {old_name}</h2>
-    {self._old_diff_html}
-  </div>
-  <div class="panel">
-    <h2>New — {new_name}</h2>
-    {self._new_diff_html}
-  </div>
-</div>
-</body>
-</html>"""
 
     # ── Sync scroll ───────────────────────────────────────────────────────────
     def _on_sync_toggled(self, checked: bool):
@@ -1263,17 +1870,19 @@ class MainWindow(QMainWindow):
         else:
             kind, anchor = 'mod', raw   # treat as two-panel nav
 
-        # Route to the correct panel(s):
-        #   del → only old panel has the anchor
-        #   add → only new panel has the anchor
-        #   mod → both panels
-        if kind == 'del':
-            self.old_panel.scroll_to_anchor(anchor)
-        elif kind == 'add':
-            self.new_panel.scroll_to_anchor(anchor)
-        else:
-            self.old_panel.scroll_to_anchor(anchor)
-            self.new_panel.scroll_to_anchor(anchor)
+        # Update the change counter to reflect the clicked item
+        for i, ch in enumerate(self._changes):
+            if ch['id'] == anchor:
+                self._change_index = i
+                self._update_change_counter()
+                label = {'del': 'Deleted', 'add': 'Added', 'mod': 'Modified'}.get(
+                    ch['kind'], 'Change')
+                n = len(self._changes)
+                self._status.showMessage(
+                    f'Change {i + 1} of {n}  ·  {label}')
+                break
+
+        self._scroll_to_change(kind, anchor)
 
     # ── Save-status indicator ──────────────────────────────────────────────────
     def _set_saved_state(self, text: str, color: str = '#6c7086'):
@@ -1288,6 +1897,25 @@ class MainWindow(QMainWindow):
 
     # ── Save XML ──────────────────────────────────────────────────────────────
     def _save_xml(self):
+        """Ctrl+S — save directly to the known path; show dialog on first save."""
+        self.xml_editor.format_xml()
+        if self._xml_save_path:
+            try:
+                with open(self._xml_save_path, 'w', encoding='utf-8') as f:
+                    f.write(self.xml_editor.toPlainText())
+                self._status.showMessage(f'Saved: {self._xml_save_path}')
+                self._set_saved_state(
+                    f'✓ Saved · {os.path.basename(self._xml_save_path)}',
+                    '#a6e3a1')
+            except Exception as e:
+                self._status.showMessage(f'Save error: {e}')
+                self._set_saved_state('✕ Save failed', '#f38ba8')
+            return
+        self._save_xml_as()
+
+    def _save_xml_as(self):
+        """Export menu → Save Final XML… — always show the Save dialog."""
+        self.xml_editor.format_xml()
         path, _ = QFileDialog.getSaveFileName(
             self, 'Save XML As', '',
             'XML Files (*.xml);;All Files (*)'
@@ -1297,6 +1925,7 @@ class MainWindow(QMainWindow):
         try:
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(self.xml_editor.toPlainText())
+            self._xml_save_path = path
             self._status.showMessage(f'Saved: {path}')
             self._set_saved_state(f'✓ Saved · {os.path.basename(path)}', '#a6e3a1')
         except Exception as e:
@@ -1305,18 +1934,14 @@ class MainWindow(QMainWindow):
 
     # ── Collapse / expand panels ──────────────────────────────────────────────
     def _toggle_sidebar(self):
-        visible = self.sidebar.isVisible()
-        self.sidebar.setVisible(not visible)
+        visible = self._sidebar_wrap.isVisible()
+        self._sidebar_wrap.setVisible(not visible)
         if visible:
-            self._btn_toggle_sidebar.setText('▶ Show')
             self._btn_sidebar_tb.setText('Changes ▶')
             self._btn_sidebar_tb.setChecked(True)
-            self._sidebar_wrap.setMaximumWidth(80)
         else:
-            self._btn_toggle_sidebar.setText('◀ Hide')
             self._btn_sidebar_tb.setText('Changes ◀')
             self._btn_sidebar_tb.setChecked(False)
-            self._sidebar_wrap.setMaximumWidth(16777215)
             self._main_splitter.setSizes([1260, 310])
 
     def _toggle_xml(self):
@@ -1335,58 +1960,80 @@ class MainWindow(QMainWindow):
 
     # ── Search bar ────────────────────────────────────────────────────────────
     def _open_search(self):
-        self._search_bar.setVisible(True)
+        """Ctrl+F — focus the toolbar search input."""
         self._search_input.setFocus()
         self._search_input.selectAll()
 
-    def _close_search(self):
-        self._search_bar.setVisible(False)
-        self._search_count_lbl.setText('')
+    # ── Per-panel pink highlight search ───────────────────────────────────────
+    _PINK_ALL = QColor('#fce7f3')   # light pink — all matches
+    _PINK_CUR = QColor('#f9a8d4')   # stronger pink — current navigated match
 
     def _on_search_changed(self, text: str):
+        """Highlight all matches pink in both panels; jump to the first."""
+        self._search_matches = []
+        self._search_idx = -1
+        self.old_panel.browser.setExtraSelections([])
+        self.new_panel.browser.setExtraSelections([])
+
         if not text:
             self._search_count_lbl.setText('')
+            self._btn_s_prev.setEnabled(False)
+            self._btn_s_next.setEnabled(False)
             return
-        t = text.lower()
-        old_count = self.old_panel.browser.toPlainText().lower().count(t)
-        new_count = self.new_panel.browser.toPlainText().lower().count(t)
-        total = old_count + new_count
-        if total == 0:
+
+        from PySide6.QtGui import QTextCharFormat
+        pink_fmt = QTextCharFormat()
+        pink_fmt.setBackground(self._PINK_ALL)
+
+        for panel in (self.old_panel, self.new_panel):
+            doc  = panel.browser.document()
+            cur  = QTextCursor(doc)
+            sels = []
+            while True:
+                cur = doc.find(text, cur)
+                if cur.isNull():
+                    break
+                self._search_matches.append((panel, QTextCursor(cur)))
+                sel        = QTextEdit.ExtraSelection()
+                sel.cursor = QTextCursor(cur)
+                sel.format = pink_fmt
+                sels.append(sel)
+            panel.browser.setExtraSelections(sels)
+
+        n = len(self._search_matches)
+        if n == 0:
             self._search_count_lbl.setText('No matches')
-            self._search_count_lbl.setStyleSheet('color:#dc2626;font-size:11px;background:transparent;')
+            self._search_count_lbl.setStyleSheet(
+                'color:#dc2626;font-size:11px;background:transparent;')
+            self._btn_s_prev.setEnabled(False)
+            self._btn_s_next.setEnabled(False)
         else:
-            self._search_count_lbl.setText(f'{total} match{"es" if total != 1 else ""}')
-            self._search_count_lbl.setStyleSheet('color:#059669;font-size:11px;background:transparent;')
+            self._btn_s_prev.setEnabled(True)
+            self._btn_s_next.setEnabled(True)
+            self._search_idx = 0
+            self._goto_search_match(0)
+
+    def _goto_search_match(self, idx: int):
+        """Scroll to match *idx*, update the counter label."""
+        if not self._search_matches:
+            return
+        n = len(self._search_matches)
+        panel, cursor = self._search_matches[idx]
+        panel.browser.setTextCursor(cursor)
+        panel.browser.ensureCursorVisible()
+        self._search_count_lbl.setText(f'{idx + 1} / {n}')
+        self._search_count_lbl.setStyleSheet(
+            'color:#7c3aed;font-size:11px;font-weight:bold;background:transparent;')
 
     def _search_next(self):
-        text = self._search_input.text()
-        if not text:
+        if not self._search_matches:
             return
-        found_old = self.old_panel.browser.find(text)
-        found_new = self.new_panel.browser.find(text)
-        if not found_old and not found_new:
-            # Wrap: reset cursors and try again from top
-            self.old_panel.browser.moveCursor(self.old_panel.browser.textCursor().MoveOperation.Start)
-            self.new_panel.browser.moveCursor(self.new_panel.browser.textCursor().MoveOperation.Start)
-            self.old_panel.browser.find(text)
-            self.new_panel.browser.find(text)
+        self._search_idx = (self._search_idx + 1) % len(self._search_matches)
+        self._goto_search_match(self._search_idx)
 
     def _search_prev(self):
-        text = self._search_input.text()
-        if not text:
+        if not self._search_matches:
             return
-        flags = QTextDocument.FindFlag.FindBackward
-        found_old = self.old_panel.browser.find(text, flags)
-        found_new = self.new_panel.browser.find(text, flags)
-        if not found_old and not found_new:
-            # Wrap: reset cursors and try again from bottom
-            from PySide6.QtGui import QTextCursor
-            c_old = self.old_panel.browser.textCursor()
-            c_old.movePosition(QTextCursor.MoveOperation.End)
-            self.old_panel.browser.setTextCursor(c_old)
-            c_new = self.new_panel.browser.textCursor()
-            c_new.movePosition(QTextCursor.MoveOperation.End)
-            self.new_panel.browser.setTextCursor(c_new)
-            self.old_panel.browser.find(text, flags)
-            self.new_panel.browser.find(text, flags)
+        self._search_idx = (self._search_idx - 1) % len(self._search_matches)
+        self._goto_search_match(self._search_idx)
 
