@@ -528,16 +528,18 @@ class _UploadPage(QWidget):
 
     # ── Custom background (image or fallback gradient) ──────────────────────
     _bg_pixmap = None   # class-level cache so QPixmap is loaded once
+    _bg_tried = False   # set to True after first load attempt
 
     @classmethod
     def _load_bg(cls):
-        if cls._bg_pixmap is None:
+        if not cls._bg_tried:
+            cls._bg_tried = True
             import os
             from PySide6.QtGui import QPixmap
             img = os.path.join(os.path.dirname(__file__), '..', 'assets', 'background.jpg')
             img = os.path.normpath(img)
             px = QPixmap(img)
-            cls._bg_pixmap = px if not px.isNull() else False  # False = not found
+            cls._bg_pixmap = px if not px.isNull() else None
         return cls._bg_pixmap
 
     def paintEvent(self, event):
@@ -1515,7 +1517,7 @@ class MainWindow(QMainWindow):
         """
         if not xml_text.strip():
             return []
-        from lxml import etree as _et
+        from lxml import etree as _et  # type: ignore[import-untyped]
         try:
             root = _et.fromstring(xml_text.encode('utf-8'))
         except Exception:
